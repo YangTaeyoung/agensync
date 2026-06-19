@@ -1,0 +1,2 @@
+description = "Summarize the current file"
+prompt = "Summarize this file in three bullet points."
