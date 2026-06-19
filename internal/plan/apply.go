@@ -28,11 +28,15 @@ func Apply(p ir.WritePlan, opts ApplyOptions) ir.ApplyResult {
 			continue
 		}
 		if f.Existing != nil && opts.Backup {
-			if err := os.WriteFile(f.Path+".bak", f.Existing, 0o644); err != nil {
-				res.Errors = append(res.Errors, err)
-				continue
+			// Preserve the pre-migration original: never overwrite an existing
+			// .bak (e.g. when several targets write the same file in one run).
+			if _, err := os.Stat(f.Path + ".bak"); os.IsNotExist(err) {
+				if err := os.WriteFile(f.Path+".bak", f.Existing, 0o644); err != nil {
+					res.Errors = append(res.Errors, err)
+					continue
+				}
+				res.BackedUp = append(res.BackedUp, f.Path+".bak")
 			}
-			res.BackedUp = append(res.BackedUp, f.Path+".bak")
 		}
 		if err := os.MkdirAll(filepath.Dir(f.Path), 0o755); err != nil {
 			res.Errors = append(res.Errors, err)
