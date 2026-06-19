@@ -107,6 +107,32 @@ func TestMemoryFileTargetsWriteMemory(t *testing.T) {
 	}
 }
 
+// TestNoPlaintextSecretLeak enforces spec §8: env-indirect targets (Codex,
+// Copilot) must never re-serialize an inline secret as plaintext.
+func TestNoPlaintextSecretLeak(t *testing.T) {
+	const token = "sk-ant-leakcanary0123456789abcdef0123"
+	reg := Default()
+	for _, id := range []string{"codex", "copilot"} {
+		a, _ := reg.Get(id)
+		b := ir.NewBundle(ir.Source{Tool: "claude-code"})
+		b.McpServers = []ir.McpServer{
+			{Common: ir.Common{Scope: ir.ScopeProject}, Name: "envsrv", Transport: ir.TransportStdio, Command: "node", Env: map[string]string{"API_KEY": token}, Enabled: true},
+			{Common: ir.Common{Scope: ir.ScopeProject}, Name: "httpsrv", Transport: ir.TransportHTTP, URL: "https://x", Headers: map[string]string{"Authorization": "Bearer " + token}, Enabled: true},
+		}
+		ctx := ir.Context{ProjectPath: t.TempDir(), HomeDir: t.TempDir()}
+		plan := a.PlanImport(b, ctx, adapter.ImportOptions{Categories: map[string]bool{"mcp": true}})
+		for _, f := range plan.Files {
+			// the .env stub is allowed to hold the secret; config files are not
+			if strings.HasSuffix(f.Path, ".env") {
+				continue
+			}
+			if strings.Contains(string(f.Content), token) {
+				t.Errorf("%s: plaintext secret leaked into %s", id, f.Path)
+			}
+		}
+	}
+}
+
 func paths(p ir.WritePlan) []string {
 	var out []string
 	for _, f := range p.Files {
