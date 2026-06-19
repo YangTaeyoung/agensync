@@ -10,6 +10,7 @@ import (
 	"github.com/YangTaeyoung/agensync/internal/adapter"
 	"github.com/YangTaeyoung/agensync/internal/engine"
 	"github.com/YangTaeyoung/agensync/internal/ir"
+	"github.com/YangTaeyoung/agensync/internal/secret"
 )
 
 const id = "codex"
@@ -272,9 +273,13 @@ func (a Codex) PlanImport(b ir.AgentConfigBundle, ctx ir.Context, opts adapter.I
 			content := enforceBudget(strings.Join(projectBodies, "\n\n"), from, &plan)
 			plan.Files = append(plan.Files, adapter.PlanFile(filepath.Join(ctx.ProjectPath, "AGENTS.md"), []byte(content)))
 		}
-		if opts.Wants("memory") && len(memoryBodies) > 0 && ctx.HomeDir != "" {
-			content := enforceBudget(strings.Join(memoryBodies, "\n\n"), from, &plan)
-			plan.Files = append(plan.Files, adapter.PlanFile(filepath.Join(ctx.HomeDir, ".codex", "AGENTS.md"), []byte(content)))
+		if opts.Wants("memory") && len(memoryBodies) > 0 {
+			if ctx.HomeDir != "" {
+				content := enforceBudget(strings.Join(memoryBodies, "\n\n"), from, &plan)
+				plan.Files = append(plan.Files, adapter.PlanFile(filepath.Join(ctx.HomeDir, ".codex", "AGENTS.md"), []byte(content)))
+			} else {
+				plan.Warnings = append(plan.Warnings, engine.Warn("memory", from, id, "~/.codex/AGENTS.md", ir.ActionManual, "personal memory needs a home dir; none resolved — add it to ~/.codex/AGENTS.md manually"))
+			}
 		}
 	}
 
@@ -298,6 +303,10 @@ func (a Codex) PlanImport(b ir.AgentConfigBundle, ctx ir.Context, opts adapter.I
 						plan.Warnings = append(plan.Warnings, engine.Warn("mcp", from, id, r.Server, ir.ActionManual, "inline secret externalized to env var "+r.EnvVar+" (.env stub); set it before running"))
 					}
 				}
+				// codex MCP TOML cannot express every attribute — warn, never silently drop.
+				for _, s := range project {
+					plan.Warnings = append(plan.Warnings, mcpAttrLoss(s, from)...)
+				}
 			}
 		}
 	}
@@ -318,12 +327,18 @@ func (a Codex) PlanImport(b ir.AgentConfigBundle, ctx ir.Context, opts adapter.I
 		}
 	}
 
-	// Subagents -> .codex/agents/<name>.toml
+	// Subagents -> .codex/agents/<name>.toml (TOML only carries name/desc/instructions/model)
 	if opts.Wants("subagents") {
 		for _, sub := range b.Subagents {
 			plan.Files = append(plan.Files, adapter.PlanFile(
 				filepath.Join(ctx.ProjectPath, ".codex", "agents", ir.Slug(sub.Name)+".toml"),
 				encodeAgentTOML(sub)))
+			if len(sub.Tools) > 0 {
+				plan.Warnings = append(plan.Warnings, engine.Warn("subagents", from, id, sub.Name, ir.ActionSkip, "codex agent TOML cannot restrict tools; tool list dropped"))
+			}
+			if len(sub.Extras) > 0 {
+				plan.Warnings = append(plan.Warnings, engine.Warn("subagents", from, id, sub.Name, ir.ActionSkip, "codex agent TOML cannot represent extra fields; dropped"))
+			}
 		}
 	}
 
@@ -338,6 +353,38 @@ func (a Codex) PlanImport(b ir.AgentConfigBundle, ctx ir.Context, opts adapter.I
 	}
 
 	return plan
+}
+
+// mcpAttrLoss reports MCP attributes codex's [mcp_servers] TOML cannot express,
+// so they are warned rather than silently dropped.
+func mcpAttrLoss(s ir.McpServer, from string) []ir.Warning {
+	var ws []ir.Warning
+	add := func(reason string) {
+		ws = append(ws, engine.Warn("mcp", from, id, s.Name, ir.ActionSkip, reason))
+	}
+	if len(s.AutoApprove) > 0 {
+		add("codex MCP TOML cannot express autoApprove; dropped")
+	}
+	if s.Timeout > 0 {
+		add("codex MCP TOML cannot express timeout; dropped")
+	}
+	if !s.Enabled {
+		add("codex has no per-server disable; server left enabled")
+	}
+	if len(s.ToolInclude) > 0 || len(s.ToolExclude) > 0 {
+		add("codex MCP TOML cannot express tool filters; dropped")
+	}
+	// Remote headers other than an externalized Authorization are not representable.
+	for k, v := range s.Headers {
+		if strings.EqualFold(k, "Authorization") {
+			if !secret.LooksLikeSecret(v) {
+				add("codex represents only secret bearer tokens; non-secret Authorization header dropped")
+			}
+			continue
+		}
+		add("codex MCP TOML cannot express header " + k + "; dropped")
+	}
+	return ws
 }
 
 func enforceBudget(content, from string, plan *ir.WritePlan) string {

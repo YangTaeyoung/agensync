@@ -195,6 +195,66 @@ func TestPlanFlattensImportsWithWarning(t *testing.T) {
 	}
 }
 
+func TestPlanMemoryNoHomeWarns(t *testing.T) {
+	a := New()
+	b := ir.NewBundle(ir.Source{Tool: "claude-code"})
+	b.Instructions = []ir.Instruction{{Common: ir.Common{Body: "personal memory", Scope: ir.ScopeUser}}}
+	// HomeDir empty -> memory cannot be written; must warn, not drop.
+	plan := a.PlanImport(b, ir.Context{ProjectPath: t.TempDir()}, adapter.ImportOptions{Categories: map[string]bool{"memory": true}})
+	var sawWarn bool
+	for _, w := range plan.Warnings {
+		if w.Category == "memory" {
+			sawWarn = true
+		}
+	}
+	if !sawWarn {
+		t.Fatalf("expected memory warning when no home dir: %+v", plan.Warnings)
+	}
+}
+
+func TestPlanMcpAttrLossWarns(t *testing.T) {
+	a := New()
+	b := ir.NewBundle(ir.Source{Tool: "claude-code"})
+	b.McpServers = []ir.McpServer{{
+		Name:        "srv",
+		Transport:   ir.TransportHTTP,
+		URL:         "https://x",
+		Headers:     map[string]string{"X-Custom": "v"},
+		AutoApprove: []string{"*"},
+		Timeout:     30,
+		Enabled:     true,
+	}}
+	plan := a.PlanImport(b, ir.Context{ProjectPath: t.TempDir()}, adapter.ImportOptions{Categories: map[string]bool{"mcp": true}})
+	got := map[string]bool{}
+	for _, w := range plan.Warnings {
+		if w.Category == "mcp" {
+			got[w.Reason] = true
+		}
+	}
+	if len(got) < 3 {
+		t.Fatalf("expected autoApprove/timeout/header loss warnings, got: %+v", plan.Warnings)
+	}
+}
+
+func TestPlanSubagentToolsLossWarns(t *testing.T) {
+	a := New()
+	b := ir.NewBundle(ir.Source{Tool: "claude-code"})
+	b.Subagents = []ir.Subagent{{Name: "rev", SystemPrompt: "review", Tools: []string{"Read", "Grep"}, Extras: map[string]any{"includeMcpJson": true}}}
+	plan := a.PlanImport(b, ir.Context{ProjectPath: t.TempDir()}, adapter.ImportOptions{Categories: map[string]bool{"subagents": true}})
+	var toolsWarn, extrasWarn bool
+	for _, w := range plan.Warnings {
+		if w.Category == "subagents" && strings.Contains(w.Reason, "tool") {
+			toolsWarn = true
+		}
+		if w.Category == "subagents" && strings.Contains(w.Reason, "extra") {
+			extrasWarn = true
+		}
+	}
+	if !toolsWarn || !extrasWarn {
+		t.Fatalf("expected subagent tools+extras loss warnings: %+v", plan.Warnings)
+	}
+}
+
 func TestPlanMemoryToHomeAgentsMd(t *testing.T) {
 	a := New()
 	b := ir.NewBundle(ir.Source{Tool: "claude-code"})
