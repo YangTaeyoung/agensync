@@ -72,6 +72,7 @@ func (Cursor) Detect(ctx ir.Context) ir.DetectionResult {
 		check(filepath.Join(ctx.ProjectPath, ".cursorrules"), ir.ScopeProject)
 		check(filepath.Join(ctx.ProjectPath, ".cursor", "mcp.json"), ir.ScopeProject)
 		check(filepath.Join(ctx.ProjectPath, ".cursorignore"), ir.ScopeProject)
+		check(filepath.Join(ctx.ProjectPath, ".cursorindexingignore"), ir.ScopeProject)
 		if dirHasFiles(filepath.Join(ctx.ProjectPath, ".cursor", "rules"), ".mdc") {
 			res.Present = true
 			res.ScopesFound = append(res.ScopesFound, ir.ScopeProject)
@@ -330,12 +331,18 @@ func (Cursor) ExportProjectState(ctx ir.Context) (ir.ProjectState, error) {
 		return ps, nil
 	}
 	// Home/global state is hash-keyed (editor DB) and not migratable; do not read it.
-	b, ok := adapter.ReadIfExists(filepath.Join(ctx.ProjectPath, ".cursorignore"))
-	if !ok {
+	// .cursorignore blocks files from the model (block mode); when absent we fall
+	// back to .cursorindexingignore which excludes files from indexing only.
+	if b, ok := adapter.ReadIfExists(filepath.Join(ctx.ProjectPath, ".cursorignore")); ok {
+		ps.IgnorePatterns = parseIgnore(b)
+		ps.IgnoreMode = ir.IgnoreBlock
 		return ps, nil
 	}
-	ps.IgnorePatterns = parseIgnore(b)
-	ps.IgnoreMode = ir.IgnoreBlock
+	if b, ok := adapter.ReadIfExists(filepath.Join(ctx.ProjectPath, ".cursorindexingignore")); ok {
+		ps.IgnorePatterns = parseIgnore(b)
+		ps.IgnoreMode = ir.IgnoreIndex
+		return ps, nil
+	}
 	return ps, nil
 }
 
@@ -360,15 +367,46 @@ func (Cursor) PlanImport(b ir.AgentConfigBundle, ctx ir.Context, opts adapter.Im
 
 	planInstructions(&plan, b, ctx, opts, from)
 
-	// MCP -> .cursor/mcp.json. Cursor supports stdio/http/sse, so nothing is dropped.
+	// MCP. Cursor supports stdio/http/sse, so no transport is dropped. Servers
+	// are keyed by scope: project-scope -> .cursor/mcp.json, user/enterprise-scope
+	// -> ~/.cursor/mcp.json. When no HomeDir is resolved, user-scope servers are
+	// merged into the project file with a per-server isolation-loss warning so the
+	// personal/project boundary is never silently collapsed.
 	if opts.Wants("mcp") && len(b.McpServers) > 0 {
-		content, err := adapter.RenderMCPServersJSON(b.McpServers, adapter.MCPJSONOptions{
-			RootKey:      "mcpServers",
-			RemoteURLKey: "url",
-			EmitType:     true,
-		})
-		if err == nil {
-			plan.Files = append(plan.Files, adapter.PlanFile(filepath.Join(ctx.ProjectPath, ".cursor", "mcp.json"), content))
+		var projectServers, userServers []ir.McpServer
+		for _, s := range b.McpServers {
+			if s.Scope == ir.ScopeUser || s.Scope == ir.ScopeEnterprise {
+				userServers = append(userServers, s)
+			} else {
+				projectServers = append(projectServers, s)
+			}
+		}
+		if len(userServers) > 0 && ctx.HomeDir != "" {
+			content, err := adapter.RenderMCPServersJSON(userServers, adapter.MCPJSONOptions{
+				RootKey:      "mcpServers",
+				RemoteURLKey: "url",
+				EmitType:     true,
+			})
+			if err == nil {
+				plan.Files = append(plan.Files, adapter.PlanFile(filepath.Join(ctx.HomeDir, ".cursor", "mcp.json"), content))
+			}
+		} else if len(userServers) > 0 {
+			// No home dir to isolate into: merge into the project file and warn that
+			// the user/personal scope boundary was lost.
+			projectServers = append(projectServers, userServers...)
+			for _, s := range userServers {
+				plan.Warnings = append(plan.Warnings, engine.Warn("mcp", from, id, s.Name, ir.ActionMerge, "user-scope MCP server merged into project .cursor/mcp.json; personal/project isolation lost"))
+			}
+		}
+		if len(projectServers) > 0 {
+			content, err := adapter.RenderMCPServersJSON(projectServers, adapter.MCPJSONOptions{
+				RootKey:      "mcpServers",
+				RemoteURLKey: "url",
+				EmitType:     true,
+			})
+			if err == nil {
+				plan.Files = append(plan.Files, adapter.PlanFile(filepath.Join(ctx.ProjectPath, ".cursor", "mcp.json"), content))
+			}
 		}
 	}
 
@@ -426,11 +464,18 @@ func (Cursor) PlanImport(b ir.AgentConfigBundle, ctx ir.Context, opts adapter.Im
 		}
 	}
 
-	// Project state: cursor has ignore files (block) but no permission/hook model.
+	// Project state: cursor has two ignore files but no permission/hook model.
+	// .cursorignore blocks files from the model (block mode); .cursorindexingignore
+	// excludes them from indexing only (index-only mode). Honoring both modes means
+	// nothing is silently collapsed (Capabilities.Ignore=="both").
 	if opts.Wants("project-state") {
 		if len(b.ProjectState.IgnorePatterns) > 0 {
+			ignoreFile := ".cursorignore"
+			if b.ProjectState.IgnoreMode == ir.IgnoreIndex {
+				ignoreFile = ".cursorindexingignore"
+			}
 			plan.Files = append(plan.Files, adapter.PlanFile(
-				filepath.Join(ctx.ProjectPath, ".cursorignore"), renderIgnore(b.ProjectState.IgnorePatterns)))
+				filepath.Join(ctx.ProjectPath, ignoreFile), renderIgnore(b.ProjectState.IgnorePatterns)))
 		}
 		if len(b.ProjectState.Permissions.Allow) > 0 || len(b.ProjectState.Permissions.Deny) > 0 || len(b.ProjectState.Permissions.Ask) > 0 {
 			plan.Warnings = append(plan.Warnings, engine.Skip("project-state", from, id, "permissions", "cursor has no project permission model"))
@@ -460,6 +505,13 @@ func planInstructions(plan *ir.WritePlan, b ir.AgentConfigBundle, ctx ir.Context
 	var rules []nonAlways
 
 	for _, in := range b.Instructions {
+		// Cursor instruction files (AGENTS.md, .cursorrules, .mdc) have no import
+		// mechanism (Capabilities.Instructions.Imports==false). Flatten any
+		// transclusions inline so they are not silently dropped.
+		if len(in.Imports) > 0 {
+			in = engine.FlattenInstruction(in)
+			plan.Warnings = append(plan.Warnings, engine.Warn("instructions", from, id, in.Origin, ir.ActionInline, "cursor has no imports; transclusions flattened inline"))
+		}
 		if in.IsMemory() {
 			memoryBodies = append(memoryBodies, in.Body)
 			continue

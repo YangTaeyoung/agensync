@@ -333,8 +333,9 @@ func (a Gemini) PlanImport(b ir.AgentConfigBundle, ctx ir.Context, opts adapter.
 		}
 	}
 
-	// Skills -> instruction fallback (always warn; append body when we will
-	// write the project instruction file).
+	// Skills -> instruction fallback (always warn; append body to the project
+	// instruction file). Gemini has no skills concept, so the only way to carry
+	// a skill across is by inlining its body into GEMINI.md.
 	var skillBodies []string
 	if opts.Wants("skills") {
 		for _, s := range b.Skills {
@@ -343,9 +344,20 @@ func (a Gemini) PlanImport(b ir.AgentConfigBundle, ctx ir.Context, opts adapter.
 		}
 	}
 
-	if opts.Wants("instructions") {
-		bodies := append([]string(nil), projectBodies...)
-		bodies = append(bodies, skillBodies...)
+	// Write the project GEMINI.md when either real instructions are requested or
+	// the skills fallback produced bodies. Without this, skills selected via
+	// --only skills would be warned as "emitted as instructions" yet never
+	// written (silent drop). The two categories share the single project file.
+	wantInstr := opts.Wants("instructions")
+	wantSkills := opts.Wants("skills")
+	if (wantInstr && len(projectBodies) > 0) || (wantSkills && len(skillBodies) > 0) {
+		var bodies []string
+		if wantInstr {
+			bodies = append(bodies, projectBodies...)
+		}
+		if wantSkills {
+			bodies = append(bodies, skillBodies...)
+		}
 		if len(bodies) > 0 {
 			plan.Files = append(plan.Files, adapter.PlanFile(
 				filepath.Join(ctx.ProjectPath, "GEMINI.md"),

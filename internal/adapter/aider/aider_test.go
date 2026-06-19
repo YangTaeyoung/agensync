@@ -291,6 +291,142 @@ func TestPlanImportRespectsCategoryGating(t *testing.T) {
 	}
 }
 
+func hasWarningAction(plan ir.WritePlan, cat, artifact string, action ir.Action) bool {
+	for _, w := range plan.Warnings {
+		if w.Category == cat && w.Action == action && (artifact == "" || strings.Contains(w.Artifact, artifact)) {
+			return true
+		}
+	}
+	return false
+}
+
+// TestPlanImportWritesAiderignore proves the natively-supported .aiderignore is
+// planned from ProjectState.IgnorePatterns (honoring the Ignore:"block" cap),
+// rather than being silently dropped.
+func TestPlanImportWritesAiderignore(t *testing.T) {
+	out := t.TempDir()
+	ctx := ir.Context{ProjectPath: out, HomeDir: t.TempDir()}
+	b := ir.NewBundle(ir.Source{Tool: "claude-code"})
+	b.ProjectState = ir.ProjectState{
+		IgnorePatterns: []string{"dist/", "node_modules/", "*.log"},
+		IgnoreMode:     ir.IgnoreBlock,
+	}
+	plan := New().PlanImport(b, ctx, adapter.ImportOptions{})
+
+	ign := findFile(plan, ".aiderignore")
+	if ign == nil {
+		t.Fatalf("expected .aiderignore in plan; files=%v", paths(plan))
+	}
+	content := string(ign.Content)
+	for _, want := range []string{"dist/", "node_modules/", "*.log"} {
+		if !strings.Contains(content, want) {
+			t.Errorf(".aiderignore missing pattern %q; got %q", want, content)
+		}
+	}
+	// Patterns are deterministically sorted.
+	if !strings.HasPrefix(content, "*.log\n") {
+		t.Errorf("expected sorted ignore output, got %q", content)
+	}
+}
+
+// TestPlanImportIndexIgnoreCollapseWarns proves an index-only source ignore is
+// collapsed to a block .aiderignore with a warning (never silent).
+func TestPlanImportIndexIgnoreCollapseWarns(t *testing.T) {
+	out := t.TempDir()
+	ctx := ir.Context{ProjectPath: out, HomeDir: t.TempDir()}
+	b := ir.NewBundle(ir.Source{Tool: "cursor"})
+	b.ProjectState = ir.ProjectState{
+		IgnorePatterns: []string{"build/"},
+		IgnoreMode:     ir.IgnoreIndex,
+	}
+	plan := New().PlanImport(b, ctx, adapter.ImportOptions{})
+
+	if findFile(plan, ".aiderignore") == nil {
+		t.Fatalf("expected .aiderignore in plan; files=%v", paths(plan))
+	}
+	if !hasWarningAction(plan, "project-state", ".aiderignore", ir.ActionInline) {
+		t.Errorf("expected index-only collapse warning; warnings=%v", plan.Warnings)
+	}
+}
+
+// TestPlanImportProjectStateUnsupportedWarn proves permissions, hooks, and trust
+// each emit a structured warning instead of being silently dropped.
+func TestPlanImportProjectStateUnsupportedWarn(t *testing.T) {
+	out := t.TempDir()
+	ctx := ir.Context{ProjectPath: out, HomeDir: t.TempDir()}
+	b := ir.NewBundle(ir.Source{Tool: "claude-code"})
+	b.ProjectState = ir.ProjectState{
+		Trust:       "trusted",
+		Permissions: ir.Permissions{Allow: []string{"Bash(ls)"}, Deny: []string{"Bash(rm)"}},
+		Hooks:       []ir.Hook{{Event: "PreToolUse"}},
+	}
+	plan := New().PlanImport(b, ctx, adapter.ImportOptions{})
+
+	if !hasWarningAction(plan, "project-state", "permissions", ir.ActionSkip) {
+		t.Errorf("expected permissions skip warning; warnings=%v", plan.Warnings)
+	}
+	if !hasWarningAction(plan, "project-state", "hooks", ir.ActionSkip) {
+		t.Errorf("expected hooks skip warning; warnings=%v", plan.Warnings)
+	}
+	if !hasWarningAction(plan, "project-state", "trust", ir.ActionManual) {
+		t.Errorf("expected trust manual warning; warnings=%v", plan.Warnings)
+	}
+}
+
+// TestPlanImportProjectStateGated proves project-state is untouched when the
+// category is not requested.
+func TestPlanImportProjectStateGated(t *testing.T) {
+	out := t.TempDir()
+	ctx := ir.Context{ProjectPath: out, HomeDir: t.TempDir()}
+	b := ir.NewBundle(ir.Source{Tool: "claude-code"})
+	b.ProjectState = ir.ProjectState{
+		IgnorePatterns: []string{"dist/"},
+		IgnoreMode:     ir.IgnoreBlock,
+		Hooks:          []ir.Hook{{Event: "PreToolUse"}},
+	}
+	plan := New().PlanImport(b, ctx, adapter.ImportOptions{Categories: map[string]bool{"instructions": true}})
+	if findFile(plan, ".aiderignore") != nil {
+		t.Errorf("did not request project-state; should not write .aiderignore; files=%v", paths(plan))
+	}
+	if hasWarning(plan, "project-state", "") {
+		t.Errorf("did not request project-state; should not warn; warnings=%v", plan.Warnings)
+	}
+}
+
+// TestPlanImportFlattensImports proves instruction imports are flattened inline
+// (aider has no imports) with a warning, rather than dropped or left dangling.
+func TestPlanImportFlattensImports(t *testing.T) {
+	out := t.TempDir()
+	ctx := ir.Context{ProjectPath: out, HomeDir: t.TempDir()}
+	b := ir.NewBundle(ir.Source{Tool: "claude-code"})
+	b.Instructions = []ir.Instruction{
+		{
+			Common: ir.Common{
+				ID:     "project",
+				Scope:  ir.ScopeProject,
+				Origin: "AGENTS.md",
+				Body:   "Top rules.\n@sub.md",
+			},
+			Activation: ir.ActAlways,
+			Imports: []ir.Import{
+				{Kind: ir.ImpInline, Target: "sub.md", Resolved: "INLINED SUB BODY"},
+			},
+		},
+	}
+	plan := New().PlanImport(b, ctx, adapter.ImportOptions{})
+
+	conv := findFile(plan, "CONVENTIONS.md")
+	if conv == nil {
+		t.Fatalf("expected CONVENTIONS.md in plan; files=%v", paths(plan))
+	}
+	if !strings.Contains(string(conv.Content), "INLINED SUB BODY") {
+		t.Errorf("expected import flattened inline; got %q", conv.Content)
+	}
+	if !hasWarningAction(plan, "instructions", "AGENTS.md", ir.ActionInline) {
+		t.Errorf("expected an imports-flattened warning; warnings=%v", plan.Warnings)
+	}
+}
+
 func paths(plan ir.WritePlan) []string {
 	var out []string
 	for _, f := range plan.Files {

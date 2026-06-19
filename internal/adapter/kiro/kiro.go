@@ -34,7 +34,12 @@ func (Kiro) Capabilities() ir.Capabilities {
 		},
 		MCP: ir.MCPCaps{
 			ProjectScope: true,
-			Transports:   []ir.Transport{ir.TransportStdio, ir.TransportHTTP, ir.TransportSSE},
+			// Kiro's mcp.json represents every remote server with a single "url"
+			// key and no "type" discriminator, so it cannot distinguish http from
+			// sse. We advertise only the transports we can faithfully represent
+			// (stdio + a single remote url that round-trips as sse) and warn per
+			// server when an incoming http server is coerced (see PlanImport).
+			Transports:   []ir.Transport{ir.TransportStdio, ir.TransportSSE},
 			SecretStyle:  ir.SecretInline,
 			RemoteURLKey: "url",
 			RootKey:      "mcpServers",
@@ -326,7 +331,17 @@ func (Kiro) PlanImport(b ir.AgentConfigBundle, ctx ir.Context, opts adapter.Impo
 	}
 
 	// MCP -> .kiro/settings/mcp.json (project). Pass through autoApprove/disabled.
+	// Kiro encodes remote servers with a single "url" key and no transport
+	// discriminator, so http and sse cannot be distinguished on disk: an http
+	// server round-trips as sse. Warn per affected server (NEVER silently change
+	// transport) before rendering.
 	if opts.Wants("mcp") && len(b.McpServers) > 0 {
+		for _, s := range b.McpServers {
+			if s.Transport == ir.TransportHTTP {
+				plan.Warnings = append(plan.Warnings, engine.Warn("mcp", from, id, s.Name, ir.ActionManual,
+					"kiro remote MCP uses a single url key; http/sse transport distinction lost (server stored as a plain url)"))
+			}
+		}
 		content, err := adapter.RenderMCPServersJSON(b.McpServers, adapter.MCPJSONOptions{
 			RootKey: "mcpServers", RemoteURLKey: "url", EmitType: false,
 		})
@@ -378,6 +393,10 @@ func (Kiro) PlanImport(b ir.AgentConfigBundle, ctx ir.Context, opts adapter.Impo
 			}
 			if sub.Model != "" {
 				fm["model"] = sub.Model
+			}
+			// Re-emit known Kiro subagent extras so they round-trip.
+			if v, ok := sub.Extras["includeMcpJson"]; ok {
+				fm["includeMcpJson"] = v
 			}
 			content, err := adapter.RenderFrontmatter(fm, sub.SystemPrompt+"\n")
 			if err != nil {

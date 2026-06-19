@@ -7,6 +7,7 @@ package windsurf
 
 import (
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/YangTaeyoung/agensync/internal/adapter"
@@ -21,6 +22,9 @@ const charBudget = 12000
 
 // defaultDir is the directory used for writes when no fuzzy dir is detected.
 const defaultDir = ".windsurf"
+
+// ignoreFile is Windsurf/Codeium's single project ignore file.
+const ignoreFile = ".codeiumignore"
 
 // fuzzyDirs are the candidate project rule/workflow roots, in detection order.
 var fuzzyDirs = []string{".windsurf", ".devin"}
@@ -407,7 +411,42 @@ func (a Windsurf) PlanImport(b ir.AgentConfigBundle, ctx ir.Context, opts adapte
 		}
 	}
 
+	// Project state: Windsurf honors a project ignore file (.codeiumignore) but
+	// has no project permission/hook model and no scriptable trust grant. Never
+	// silently drop any of these — write the ignore file (collapsing block/index
+	// modes to the single supported file) and warn on every lossy decision.
+	if opts.Wants("project-state") {
+		ps := b.ProjectState
+		if len(ps.IgnorePatterns) > 0 {
+			plan.Files = append(plan.Files, adapter.PlanFile(
+				filepath.Join(ctx.ProjectPath, ignoreFile), renderIgnore(ps.IgnorePatterns)))
+			if ps.IgnoreMode == ir.IgnoreIndex {
+				plan.Warnings = append(plan.Warnings, engine.Warn("ignore", from, id, ignoreFile, ir.ActionMerge,
+					"windsurf has a single .codeiumignore; index-only patterns collapsed to a block ignore"))
+			}
+		}
+		if len(ps.Permissions.Allow) > 0 || len(ps.Permissions.Deny) > 0 || len(ps.Permissions.Ask) > 0 {
+			plan.Warnings = append(plan.Warnings, engine.Skip("project-state", from, id, "permissions",
+				"windsurf has no project permission model"))
+		}
+		if len(ps.Hooks) > 0 {
+			plan.Warnings = append(plan.Warnings, engine.Skip("project-state", from, id, "hooks",
+				"windsurf has no hooks model"))
+		}
+		if ps.Trust != "" {
+			plan.Warnings = append(plan.Warnings, engine.Warn("project-state", from, id, "trust", ir.ActionManual,
+				"windsurf trust is not scriptable; re-grant in the editor"))
+		}
+	}
+
 	return plan
+}
+
+// renderIgnore serializes ignore patterns into a deterministic .codeiumignore body.
+func renderIgnore(patterns []string) []byte {
+	sorted := append([]string(nil), patterns...)
+	sort.Strings(sorted)
+	return []byte(strings.Join(sorted, "\n") + "\n")
 }
 
 // ruleFile renders a single rule with a trigger frontmatter, enforcing the

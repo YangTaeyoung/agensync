@@ -369,6 +369,72 @@ func TestPlanImportMemoryWritesFile(t *testing.T) {
 	}
 }
 
+func TestPlanImportSkillsOnlyWritesFallback(t *testing.T) {
+	proj := t.TempDir()
+	home := t.TempDir()
+	ctx := ir.Context{ProjectPath: proj, HomeDir: home}
+	// skills selected, instructions NOT selected: the skill body must still be
+	// written to GEMINI.md (the only fallback), matching the emitted warning.
+	plan := New().PlanImport(basicBundle(), ctx, adapter.ImportOptions{Categories: map[string]bool{"skills": true}})
+
+	gem, ok := findFile(plan, filepath.Join(proj, "GEMINI.md"))
+	if !ok {
+		t.Fatalf("skills-only import must write GEMINI.md fallback; files: %v", paths(plan))
+	}
+	if !strings.Contains(string(gem.Content), "Run the deploy script") {
+		t.Fatalf("GEMINI.md must contain the skill body: %q", gem.Content)
+	}
+	// the project instruction body must NOT leak in (instructions not requested)
+	if strings.Contains(string(gem.Content), "Project rules") {
+		t.Fatalf("project instruction body must not be written for skills-only import: %q", gem.Content)
+	}
+
+	// the skills warning must be present and claim instruction emission (matches reality now)
+	var sawSkill bool
+	for _, w := range plan.Warnings {
+		if w.Category == "skills" {
+			sawSkill = true
+			if w.Action != ir.ActionInline {
+				t.Fatalf("skills warning action = %q, want inline", w.Action)
+			}
+		}
+	}
+	if !sawSkill {
+		t.Fatalf("expected a skills warning; warnings: %+v", plan.Warnings)
+	}
+}
+
+func TestPlanImportSkillsOnlyNoSkillsNoFile(t *testing.T) {
+	proj := t.TempDir()
+	home := t.TempDir()
+	ctx := ir.Context{ProjectPath: proj, HomeDir: home}
+	b := basicBundle()
+	b.Skills = nil // skills requested but bundle has none
+	plan := New().PlanImport(b, ctx, adapter.ImportOptions{Categories: map[string]bool{"skills": true}})
+	if _, ok := findFile(plan, filepath.Join(proj, "GEMINI.md")); ok {
+		t.Fatalf("no GEMINI.md should be written when there are no skill bodies: %v", paths(plan))
+	}
+}
+
+func TestPlanImportInstructionsOnlyNoSkillBody(t *testing.T) {
+	proj := t.TempDir()
+	home := t.TempDir()
+	ctx := ir.Context{ProjectPath: proj, HomeDir: home}
+	// instructions selected, skills NOT: GEMINI.md must contain the instruction
+	// body but not the skill fallback body.
+	plan := New().PlanImport(basicBundle(), ctx, adapter.ImportOptions{Categories: map[string]bool{"instructions": true}})
+	gem, ok := findFile(plan, filepath.Join(proj, "GEMINI.md"))
+	if !ok {
+		t.Fatalf("instructions-only import must write GEMINI.md; files: %v", paths(plan))
+	}
+	if !strings.Contains(string(gem.Content), "Project rules") {
+		t.Fatalf("GEMINI.md must contain instruction body: %q", gem.Content)
+	}
+	if strings.Contains(string(gem.Content), "Run the deploy script") {
+		t.Fatalf("skill body must not be written when skills not requested: %q", gem.Content)
+	}
+}
+
 func paths(plan ir.WritePlan) []string {
 	var out []string
 	for _, f := range plan.Files {

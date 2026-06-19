@@ -331,6 +331,208 @@ func TestUnsupportedCategoriesWarn(t *testing.T) {
 	}
 }
 
+func TestExportProjectStateIgnore(t *testing.T) {
+	// .clineignore in testdata must round-trip into ProjectState.IgnorePatterns.
+	ps, err := New().ExportProjectState(fromCtx(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ps.IgnoreMode != ir.IgnoreBlock {
+		t.Fatalf("ignore mode=%q", ps.IgnoreMode)
+	}
+	var sawNodeModules, sawSecrets, sawComment bool
+	for _, p := range ps.IgnorePatterns {
+		switch p {
+		case "node_modules":
+			sawNodeModules = true
+		case "secrets.env":
+			sawSecrets = true
+		case "# a comment":
+			sawComment = true
+		}
+	}
+	if !sawNodeModules || !sawSecrets {
+		t.Fatalf("ignore patterns lost: %+v", ps.IgnorePatterns)
+	}
+	if sawComment {
+		t.Fatalf("comment line should be stripped: %+v", ps.IgnorePatterns)
+	}
+}
+
+func TestPlanImportIgnoreWritesClineignore(t *testing.T) {
+	a := New()
+	b := ir.NewBundle(ir.Source{Tool: "cursor"})
+	b.ProjectState = ir.ProjectState{
+		IgnorePatterns: []string{"dist", "node_modules"},
+		IgnoreMode:     ir.IgnoreBlock,
+	}
+	out := t.TempDir()
+	plan := a.PlanImport(b, ir.Context{ProjectPath: out, HomeDir: t.TempDir()},
+		adapter.ImportOptions{Categories: map[string]bool{"project-state": true}})
+
+	var content string
+	for _, f := range plan.Files {
+		if f.Path == filepath.Join(out, ".clineignore") {
+			content = string(f.Content)
+		}
+	}
+	if content == "" {
+		t.Fatalf(".clineignore not planned: %+v", plan.Files)
+	}
+	if !strings.Contains(content, "dist") || !strings.Contains(content, "node_modules") {
+		t.Fatalf(".clineignore content=%q", content)
+	}
+}
+
+func TestPlanImportIgnoreIndexModeCollapsesWithWarn(t *testing.T) {
+	a := New()
+	b := ir.NewBundle(ir.Source{Tool: "cursor"})
+	b.ProjectState = ir.ProjectState{
+		IgnorePatterns: []string{"build"},
+		IgnoreMode:     ir.IgnoreIndex,
+	}
+	out := t.TempDir()
+	plan := a.PlanImport(b, ir.Context{ProjectPath: out, HomeDir: t.TempDir()},
+		adapter.ImportOptions{Categories: map[string]bool{"project-state": true}})
+
+	var sawFile, sawWarn bool
+	for _, f := range plan.Files {
+		if f.Path == filepath.Join(out, ".clineignore") {
+			sawFile = true
+		}
+	}
+	for _, w := range plan.Warnings {
+		if w.Category == "project-state" && w.Artifact == ".clineignore" && w.Action == ir.ActionMerge {
+			sawWarn = true
+			if !strings.Contains(w.Reason, "block-only") {
+				t.Fatalf("warn reason=%q", w.Reason)
+			}
+		}
+	}
+	if !sawFile {
+		t.Fatalf("index-only ignore must still be written as block file: %+v", plan.Files)
+	}
+	if !sawWarn {
+		t.Fatalf("index-only collapse must warn: %+v", plan.Warnings)
+	}
+}
+
+func TestPlanImportProjectStatePermissionsHooksTrustWarn(t *testing.T) {
+	a := New()
+	b := ir.NewBundle(ir.Source{Tool: "claude-code"})
+	b.ProjectState = ir.ProjectState{
+		Permissions: ir.Permissions{Allow: []string{"Read"}, Deny: []string{"Bash"}},
+		Hooks:       []ir.Hook{{Event: "PreToolUse", Command: "echo hi"}},
+		Trust:       "trusted",
+	}
+	out := t.TempDir()
+	plan := a.PlanImport(b, ir.Context{ProjectPath: out, HomeDir: t.TempDir()},
+		adapter.ImportOptions{Categories: map[string]bool{"project-state": true}})
+
+	var sawPerms, sawHooks, sawTrust bool
+	for _, w := range plan.Warnings {
+		if w.Category != "project-state" {
+			continue
+		}
+		switch w.Artifact {
+		case "permissions":
+			if w.Action == ir.ActionSkip {
+				sawPerms = true
+			}
+		case "hooks":
+			if w.Action == ir.ActionSkip {
+				sawHooks = true
+			}
+		case "trust":
+			if w.Action == ir.ActionManual {
+				sawTrust = true
+			}
+		}
+	}
+	if !sawPerms || !sawHooks || !sawTrust {
+		t.Fatalf("project-state drops must warn: perms=%v hooks=%v trust=%v (%+v)", sawPerms, sawHooks, sawTrust, plan.Warnings)
+	}
+}
+
+func TestPlanImportInstructionsFlattenImports(t *testing.T) {
+	a := New()
+	b := ir.NewBundle(ir.Source{Tool: "claude-code"})
+	b.Instructions = []ir.Instruction{{
+		Common: ir.Common{
+			ID:     "proj",
+			Origin: "CLAUDE.md",
+			Body:   "before @sub.md after",
+			Scope:  ir.ScopeProject,
+		},
+		Imports: []ir.Import{{Kind: ir.ImpInline, Target: "sub.md", Resolved: "FLATTENED-CONTENT"}},
+	}}
+	out := t.TempDir()
+	plan := a.PlanImport(b, ir.Context{ProjectPath: out, HomeDir: t.TempDir()},
+		adapter.ImportOptions{Categories: map[string]bool{"instructions": true}})
+
+	var body string
+	for _, f := range plan.Files {
+		if strings.HasPrefix(f.Path, filepath.Join(out, ".clinerules")) && strings.HasSuffix(f.Path, ".md") {
+			body = string(f.Content)
+		}
+	}
+	if !strings.Contains(body, "FLATTENED-CONTENT") {
+		t.Fatalf("imports not flattened into body: %q", body)
+	}
+	var sawWarn bool
+	for _, w := range plan.Warnings {
+		if w.Category == "instructions" && w.Action == ir.ActionInline {
+			sawWarn = true
+			if !strings.Contains(w.Reason, "imports") {
+				t.Fatalf("flatten warn reason=%q", w.Reason)
+			}
+		}
+	}
+	if !sawWarn {
+		t.Fatalf("flattening imports must warn: %+v", plan.Warnings)
+	}
+}
+
+func TestPlanImportMcpNoHomeDirWarnsNotSilent(t *testing.T) {
+	a := New()
+	b := ir.NewBundle(ir.Source{Tool: "claude-code"})
+	b.McpServers = []ir.McpServer{
+		{Common: ir.Common{Scope: ir.ScopeUser}, Name: "global1", Transport: ir.TransportStdio, Command: "npx", Enabled: true},
+		{Common: ir.Common{Scope: ir.ScopeProject}, Name: "projsrv", Transport: ir.TransportStdio, Command: "node", Enabled: true},
+	}
+	out := t.TempDir()
+	// HomeDir intentionally empty: servers cannot be written globally.
+	plan := a.PlanImport(b, ir.Context{ProjectPath: out, HomeDir: ""},
+		adapter.ImportOptions{Categories: map[string]bool{"mcp": true}})
+
+	for _, f := range plan.Files {
+		if strings.HasSuffix(f.Path, "cline_mcp_settings.json") {
+			t.Fatalf("no settings file should be written without a home dir: %s", f.Path)
+		}
+	}
+	// Both servers must be reported as skipped (not silently dropped), and the
+	// project-scope server must still get its isolation-loss merge warning.
+	skipped := map[string]bool{}
+	var sawProjMerge bool
+	for _, w := range plan.Warnings {
+		if w.Category != "mcp" {
+			continue
+		}
+		if w.Action == ir.ActionSkip {
+			skipped[w.Artifact] = true
+		}
+		if w.Artifact == "projsrv" && w.Action == ir.ActionMerge {
+			sawProjMerge = true
+		}
+	}
+	if !skipped["global1"] || !skipped["projsrv"] {
+		t.Fatalf("both servers must be skip-warned when no home dir: %+v", plan.Warnings)
+	}
+	if !sawProjMerge {
+		t.Fatalf("project-scope isolation warning must still fire: %+v", plan.Warnings)
+	}
+}
+
 func TestRoundTripExportThenImport(t *testing.T) {
 	a := New()
 	home := t.TempDir()

@@ -370,3 +370,148 @@ func TestUnsupportedCategoriesWarn(t *testing.T) {
 		t.Fatalf("mcp.json not written: %v", err)
 	}
 }
+
+// Imports must be flattened inline (Capabilities.Imports==false) and a warning
+// emitted — never written verbatim, never dropped.
+func TestInstructionImportsFlattenedAndWarned(t *testing.T) {
+	a := New()
+	b := ir.NewBundle(ir.Source{Tool: "claude-code"})
+	b.Instructions = []ir.Instruction{{
+		Common: ir.Common{
+			Scope:  ir.ScopeProject,
+			Origin: "CLAUDE.md",
+			Body:   "see @shared.md for rules",
+		},
+		Activation: ir.ActAlways,
+		Imports: []ir.Import{{
+			Kind:     ir.ImpInline,
+			Target:   "shared.md",
+			Resolved: "FLATTENED IMPORT CONTENT",
+		}},
+	}}
+	out := t.TempDir()
+	dctx := ir.Context{ProjectPath: out, HomeDir: t.TempDir()}
+	plan := a.PlanImport(b, dctx, adapter.ImportOptions{Categories: map[string]bool{"instructions": true}})
+
+	var found bool
+	for _, f := range plan.Files {
+		if strings.HasSuffix(f.Path, filepath.Join(".github", "copilot-instructions.md")) {
+			found = true
+			if !strings.Contains(string(f.Content), "FLATTENED IMPORT CONTENT") {
+				t.Fatalf("import not flattened into body: %s", f.Content)
+			}
+			if strings.Contains(string(f.Content), "@shared.md") {
+				t.Fatalf("raw import marker still present: %s", f.Content)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("copilot-instructions.md not planned: %v", planPaths(plan))
+	}
+	var warned bool
+	for _, w := range plan.Warnings {
+		if w.Category == "instructions" && w.Action == ir.ActionInline && strings.Contains(w.Reason, "flattened") {
+			warned = true
+		}
+	}
+	if !warned {
+		t.Fatalf("expected an instructions flatten warning, got %+v", plan.Warnings)
+	}
+}
+
+// Inline MCP secrets (env values and Authorization headers) must be externalized
+// to env-var refs + a .env stub; the rendered mcp.json must not contain the
+// plaintext, and a manual warning must be emitted per externalized secret.
+func TestMcpInlineSecretExternalized(t *testing.T) {
+	a := New()
+	b := ir.NewBundle(ir.Source{Tool: "claude-code"})
+	const envSecret = "sk-envvalue0123456789abcdef0123456789"
+	const hdrSecret = "ghp_0123456789abcdefghij0123456789abcdef"
+	b.McpServers = []ir.McpServer{
+		{
+			Common:    ir.Common{Scope: ir.ScopeProject},
+			Name:      "stdio-srv",
+			Transport: ir.TransportStdio,
+			Command:   "x",
+			Env:       map[string]string{"API_KEY": envSecret, "PLAIN": "keepme"},
+			Enabled:   true,
+		},
+		{
+			Common:    ir.Common{Scope: ir.ScopeProject},
+			Name:      "http-srv",
+			Transport: ir.TransportHTTP,
+			URL:       "https://example.com",
+			Headers:   map[string]string{"Authorization": "Bearer " + hdrSecret},
+			Enabled:   true,
+		},
+	}
+	out := t.TempDir()
+	dctx := ir.Context{ProjectPath: out, HomeDir: t.TempDir()}
+	plan := a.PlanImport(b, dctx, adapter.ImportOptions{Categories: map[string]bool{"mcp": true}})
+
+	var mcpJSON, envFile string
+	for _, f := range plan.Files {
+		switch {
+		case strings.HasSuffix(f.Path, filepath.Join(".github", "mcp.json")):
+			mcpJSON = string(f.Content)
+		case strings.HasSuffix(f.Path, ".env"):
+			envFile = string(f.Content)
+		}
+	}
+	if mcpJSON == "" {
+		t.Fatalf("mcp.json not planned: %v", planPaths(plan))
+	}
+	if strings.Contains(mcpJSON, envSecret) || strings.Contains(mcpJSON, hdrSecret) {
+		t.Fatalf("mcp.json must not contain plaintext secret:\n%s", mcpJSON)
+	}
+	if !strings.Contains(mcpJSON, "${") {
+		t.Fatalf("mcp.json should reference an env var:\n%s", mcpJSON)
+	}
+	if !strings.Contains(mcpJSON, "keepme") {
+		t.Fatalf("non-secret env value should be preserved:\n%s", mcpJSON)
+	}
+	if envFile == "" {
+		t.Fatalf(".env stub not planned: %v", planPaths(plan))
+	}
+	if !strings.Contains(envFile, envSecret) || !strings.Contains(envFile, hdrSecret) {
+		t.Fatalf(".env should hold the secrets:\n%s", envFile)
+	}
+	var secretWarns int
+	for _, w := range plan.Warnings {
+		if w.Category == "mcp" && w.Action == ir.ActionManual && strings.Contains(w.Reason, "secret") {
+			secretWarns++
+		}
+	}
+	if secretWarns < 2 {
+		t.Fatalf("expected a manual secret warning per externalized secret, got %+v", plan.Warnings)
+	}
+}
+
+// ProjectState hooks and trust have no copilot representation: never drop them
+// silently — each must emit a structured warning.
+func TestProjectStateHooksAndTrustWarn(t *testing.T) {
+	a := New()
+	b := ir.NewBundle(ir.Source{Tool: "claude-code"})
+	b.ProjectState = ir.ProjectState{
+		Hooks: []ir.Hook{{Event: "PreToolUse", Command: "echo hi"}},
+		Trust: "trusted",
+	}
+	dctx := ir.Context{ProjectPath: t.TempDir(), HomeDir: t.TempDir()}
+	plan := a.PlanImport(b, dctx, adapter.ImportOptions{Categories: map[string]bool{"project-state": true}})
+
+	var hooksWarn, trustWarn bool
+	for _, w := range plan.Warnings {
+		if w.Category == "hooks" && strings.Contains(w.Reason, "hooks") {
+			hooksWarn = true
+		}
+		if w.Category == "project-state" && w.Artifact == "trust" {
+			trustWarn = true
+		}
+	}
+	if !hooksWarn {
+		t.Fatalf("expected a hooks warning, got %+v", plan.Warnings)
+	}
+	if !trustWarn {
+		t.Fatalf("expected a trust warning, got %+v", plan.Warnings)
+	}
+}

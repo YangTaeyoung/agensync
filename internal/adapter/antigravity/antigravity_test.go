@@ -231,6 +231,131 @@ func TestPlanImportSkillsAndCommands(t *testing.T) {
 	}
 }
 
+func TestPlanImportSSEServerSkippedWithWarning(t *testing.T) {
+	a := New()
+	b := ir.NewBundle(ir.Source{Tool: "claude-code"})
+	b.McpServers = []ir.McpServer{
+		{Name: "sse-srv", Transport: ir.TransportSSE, URL: "https://sse.example.com/sse", Enabled: true},
+		{Name: "http-srv", Transport: ir.TransportHTTP, URL: "https://http.example.com", Enabled: true},
+	}
+	out := t.TempDir()
+	plan := a.PlanImport(b, ir.Context{ProjectPath: out}, adapter.ImportOptions{Categories: map[string]bool{"mcp": true}})
+
+	// The SSE server must be skipped with a warning, never coerced to serverUrl.
+	var sawSSEWarn bool
+	for _, w := range plan.Warnings {
+		if w.Category == "mcp" && w.Artifact == "sse-srv" && w.Action == ir.ActionSkip {
+			sawSSEWarn = true
+		}
+	}
+	if !sawSSEWarn {
+		t.Fatalf("expected SSE skip warning: %+v", plan.Warnings)
+	}
+
+	var content string
+	for _, f := range plan.Files {
+		if f.Path == filepath.Join(out, ".agents", "mcp_config.json") {
+			content = string(f.Content)
+		}
+	}
+	if content == "" {
+		t.Fatalf("mcp_config.json not planned (http server should still be written): %+v", plan.Files)
+	}
+	// The SSE server's URL must not appear in the rendered output.
+	if strings.Contains(content, "https://sse.example.com/sse") || strings.Contains(content, "sse-srv") {
+		t.Fatalf("SSE server must not be rendered:\n%s", content)
+	}
+	if !strings.Contains(content, "http-srv") {
+		t.Fatalf("http server should still be rendered:\n%s", content)
+	}
+}
+
+func TestPlanImportSSEOnlyNoFileWritten(t *testing.T) {
+	a := New()
+	b := ir.NewBundle(ir.Source{Tool: "claude-code"})
+	b.McpServers = []ir.McpServer{
+		{Name: "sse-only", Transport: ir.TransportSSE, URL: "https://sse.example.com/sse", Enabled: true},
+	}
+	out := t.TempDir()
+	plan := a.PlanImport(b, ir.Context{ProjectPath: out}, adapter.ImportOptions{Categories: map[string]bool{"mcp": true}})
+	for _, f := range plan.Files {
+		if f.Path == filepath.Join(out, ".agents", "mcp_config.json") {
+			t.Fatalf("no mcp_config.json should be planned when only SSE servers exist:\n%s", f.Content)
+		}
+	}
+	var sawSSEWarn bool
+	for _, w := range plan.Warnings {
+		if w.Category == "mcp" && w.Artifact == "sse-only" && w.Action == ir.ActionSkip {
+			sawSSEWarn = true
+		}
+	}
+	if !sawSSEWarn {
+		t.Fatalf("expected SSE skip warning: %+v", plan.Warnings)
+	}
+}
+
+func TestPlanImportHooksSkipWarning(t *testing.T) {
+	a := New()
+	b := ir.NewBundle(ir.Source{Tool: "claude-code"})
+	b.ProjectState = ir.ProjectState{
+		Hooks: []ir.Hook{{Event: "PreToolUse", Command: "echo hi"}},
+	}
+	out := t.TempDir()
+	plan := a.PlanImport(b, ir.Context{ProjectPath: out}, adapter.ImportOptions{Categories: map[string]bool{"project-state": true}})
+
+	var sawHooksWarn bool
+	for _, w := range plan.Warnings {
+		if w.Category == "project-state" && w.Artifact == "hooks" && w.Action == ir.ActionSkip {
+			sawHooksWarn = true
+		}
+	}
+	if !sawHooksWarn {
+		t.Fatalf("expected hooks skip warning: %+v", plan.Warnings)
+	}
+}
+
+func TestPlanImportFlattensImports(t *testing.T) {
+	a := New()
+	b := ir.NewBundle(ir.Source{Tool: "claude-code"})
+	b.Instructions = []ir.Instruction{
+		{
+			Common: ir.Common{
+				Body:   "see @sub.md for details",
+				Scope:  ir.ScopeProject,
+				Origin: "AGENTS.md",
+			},
+			Imports: []ir.Import{{Kind: ir.ImpInline, Target: "sub.md", Resolved: "SUB CONTENT"}},
+		},
+	}
+	out := t.TempDir()
+	plan := a.PlanImport(b, ir.Context{ProjectPath: out}, adapter.ImportOptions{Categories: map[string]bool{"instructions": true}})
+
+	var content string
+	for _, f := range plan.Files {
+		if f.Path == filepath.Join(out, "AGENTS.md") {
+			content = string(f.Content)
+		}
+	}
+	if content == "" {
+		t.Fatalf("AGENTS.md not planned: %+v", plan.Files)
+	}
+	if !strings.Contains(content, "SUB CONTENT") {
+		t.Fatalf("import not flattened inline:\n%s", content)
+	}
+	if strings.Contains(content, "@sub.md") {
+		t.Fatalf("import marker should be replaced:\n%s", content)
+	}
+	var sawFlattenWarn bool
+	for _, w := range plan.Warnings {
+		if w.Category == "instructions" && w.Action == ir.ActionInline && strings.Contains(w.Reason, "flattened") {
+			sawFlattenWarn = true
+		}
+	}
+	if !sawFlattenWarn {
+		t.Fatalf("expected imports-flattened warning: %+v", plan.Warnings)
+	}
+}
+
 // TestUnsupportedCategoriesWarn feeds a bundle containing every category and
 // asserts a warning exists for each category antigravity cannot represent.
 func TestUnsupportedCategoriesWarn(t *testing.T) {

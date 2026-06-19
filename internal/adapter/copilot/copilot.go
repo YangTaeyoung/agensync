@@ -31,7 +31,9 @@ func (Copilot) Capabilities() ir.Capabilities {
 		MCP: ir.MCPCaps{
 			ProjectScope: true,
 			Transports:   []ir.Transport{ir.TransportStdio, ir.TransportHTTP, ir.TransportSSE},
-			SecretStyle:  ir.SecretInline,
+			// Inline secrets are externalized to env-var refs + a .env stub on
+			// import; copilot configs never carry plaintext credentials (§8).
+			SecretStyle:  ir.SecretEnvIndirect,
 			RemoteURLKey: "url",
 			RootKey:      "mcpServers",
 			Format:       "json",
@@ -387,6 +389,13 @@ func (Copilot) planInstructions(b ir.AgentConfigBundle, ctx ir.Context, opts ada
 	var memoryBodies []ir.Instruction
 
 	for _, in := range b.Instructions {
+		// Copilot has no transclusion/import mechanism (Capabilities.Imports ==
+		// false): flatten resolved imports inline and warn so nothing is lost.
+		if len(in.Imports) > 0 {
+			in = engine.FlattenInstruction(in)
+			plan.Warnings = append(plan.Warnings, engine.Warn("instructions", from, id, in.Origin, ir.ActionInline,
+				"copilot has no imports; transclusions flattened inline"))
+		}
 		if in.IsMemory() {
 			memoryBodies = append(memoryBodies, in)
 			continue
@@ -440,7 +449,10 @@ func (Copilot) planMCP(b ir.AgentConfigBundle, ctx ir.Context, opts adapter.Impo
 		return
 	}
 	if len(b.McpServers) > 0 {
-		content, err := adapter.RenderMCPServersJSON(b.McpServers, adapter.MCPJSONOptions{
+		// Externalize any inline secret to an env-var reference + .env stub so
+		// the rendered JSON never contains plaintext credentials (§8).
+		servers, refs := externalizeSecrets(b.McpServers)
+		content, err := adapter.RenderMCPServersJSON(servers, adapter.MCPJSONOptions{
 			RootKey:      "mcpServers",
 			RemoteURLKey: "url",
 			EmitType:     true,
@@ -448,6 +460,14 @@ func (Copilot) planMCP(b ir.AgentConfigBundle, ctx ir.Context, opts adapter.Impo
 		if err == nil {
 			plan.Files = append(plan.Files, adapter.PlanFile(
 				filepath.Join(ctx.ProjectPath, ".github", "mcp.json"), content))
+			if len(refs) > 0 {
+				plan.Files = append(plan.Files, adapter.PlanFile(
+					filepath.Join(ctx.ProjectPath, ".env"), renderEnvStub(refs)))
+				for _, r := range refs {
+					plan.Warnings = append(plan.Warnings, engine.Warn("mcp", from, id, r.Server, ir.ActionManual,
+						"inline secret externalized to env var "+r.EnvVar+" (.env stub); set it before running"))
+				}
+			}
 		}
 	}
 	// Always warn about the two known divergences (independent of server count).
@@ -533,6 +553,17 @@ func (Copilot) planSubagents(b ir.AgentConfigBundle, ctx ir.Context, opts adapte
 func (Copilot) planProjectState(b ir.AgentConfigBundle, ctx ir.Context, opts adapter.ImportOptions, plan *ir.WritePlan, from string) {
 	if !opts.Wants("project-state") && !opts.Wants("permissions") {
 		return
+	}
+	// Copilot has no hooks model (Capabilities.Hooks == false) and no
+	// file-based trust flag: never silently drop these — emit one structured
+	// warning each instead (§7).
+	if len(b.ProjectState.Hooks) > 0 {
+		plan.Warnings = append(plan.Warnings, engine.Warn("hooks", from, id, "hooks", ir.ActionManual,
+			"copilot has no hooks model; configure manually"))
+	}
+	if b.ProjectState.Trust != "" {
+		plan.Warnings = append(plan.Warnings, engine.Warn("project-state", from, id, "trust", ir.ActionManual,
+			"copilot has no file-based trust flag; grant trust on first run"))
 	}
 	perms := b.ProjectState.Permissions
 	if len(perms.Allow) == 0 && len(perms.Deny) == 0 && len(perms.Ask) == 0 {

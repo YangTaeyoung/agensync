@@ -391,6 +391,176 @@ func TestUnsupportedCategoriesWarn(t *testing.T) {
 	}
 }
 
+// Imports: cursor instruction files have no transclusion mechanism
+// (Capabilities.Instructions.Imports==false). PlanImport must flatten imports
+// inline and emit a structured warning rather than dropping or writing markers.
+func TestPlanImportFlattensInstructionImportsAndWarns(t *testing.T) {
+	a := New()
+	b := ir.NewBundle(ir.Source{Tool: "claude-code"})
+	b.Instructions = []ir.Instruction{
+		{
+			Common: ir.Common{
+				ID:     "main",
+				Origin: "CLAUDE.md",
+				Body:   "Top body. See @shared.md for details.",
+				Scope:  ir.ScopeProject,
+			},
+			Activation: ir.ActAlways,
+			Imports: []ir.Import{
+				{Kind: ir.ImpInline, Target: "shared.md", Resolved: "SHARED CONTENT"},
+			},
+		},
+	}
+	out := t.TempDir()
+	plan := a.PlanImport(b, ir.Context{ProjectPath: out}, adapter.ImportOptions{Categories: map[string]bool{"instructions": true}})
+
+	var body string
+	for _, f := range plan.Files {
+		if f.Path == filepath.Join(out, "AGENTS.md") {
+			body = string(f.Content)
+		}
+	}
+	if !strings.Contains(body, "SHARED CONTENT") {
+		t.Fatalf("import not flattened inline: %q", body)
+	}
+	if strings.Contains(body, "@shared.md") {
+		t.Fatalf("import marker should be replaced: %q", body)
+	}
+	var sawWarn bool
+	for _, w := range plan.Warnings {
+		if w.Category == "instructions" && w.Action == ir.ActionInline {
+			sawWarn = true
+		}
+	}
+	if !sawWarn {
+		t.Fatalf("expected instructions/inline flatten warning, got %+v", plan.Warnings)
+	}
+}
+
+// User-scope MCP servers must be isolated to ~/.cursor/mcp.json (not silently
+// flattened into the project file) when a HomeDir is available.
+func TestPlanImportUserMcpScopedToHome(t *testing.T) {
+	a := New()
+	b := ir.NewBundle(ir.Source{Tool: "claude-code"})
+	b.McpServers = []ir.McpServer{
+		{Common: ir.Common{Scope: ir.ScopeProject}, Name: "projsrv", Transport: ir.TransportStdio, Command: "px", Enabled: true},
+		{Common: ir.Common{Scope: ir.ScopeUser}, Name: "usersrv", Transport: ir.TransportStdio, Command: "ux", Enabled: true},
+	}
+	out := t.TempDir()
+	home := t.TempDir()
+	plan := a.PlanImport(b, ir.Context{ProjectPath: out, HomeDir: home}, adapter.ImportOptions{Categories: map[string]bool{"mcp": true}})
+
+	var projContent, homeContent string
+	for _, f := range plan.Files {
+		if f.Path == filepath.Join(out, ".cursor", "mcp.json") {
+			projContent = string(f.Content)
+		}
+		if f.Path == filepath.Join(home, ".cursor", "mcp.json") {
+			homeContent = string(f.Content)
+		}
+	}
+	if homeContent == "" {
+		t.Fatalf("user-scope server not written to ~/.cursor/mcp.json; files=%+v", plan.Files)
+	}
+	if !strings.Contains(homeContent, "usersrv") {
+		t.Fatalf("home mcp.json missing user server: %q", homeContent)
+	}
+	if strings.Contains(homeContent, "projsrv") {
+		t.Fatalf("home mcp.json should not contain project server: %q", homeContent)
+	}
+	if !strings.Contains(projContent, "projsrv") || strings.Contains(projContent, "usersrv") {
+		t.Fatalf("project mcp.json scope leak: %q", projContent)
+	}
+}
+
+// When no HomeDir is resolved, a user-scope server is merged into the project
+// file but must emit a per-server isolation-loss warning (never silent).
+func TestPlanImportUserMcpMergeWarnsWhenNoHome(t *testing.T) {
+	a := New()
+	b := ir.NewBundle(ir.Source{Tool: "claude-code"})
+	b.McpServers = []ir.McpServer{
+		{Common: ir.Common{Scope: ir.ScopeUser}, Name: "usersrv", Transport: ir.TransportStdio, Command: "ux", Enabled: true},
+	}
+	out := t.TempDir()
+	plan := a.PlanImport(b, ir.Context{ProjectPath: out}, adapter.ImportOptions{Categories: map[string]bool{"mcp": true}})
+
+	var projContent string
+	for _, f := range plan.Files {
+		if f.Path == filepath.Join(out, ".cursor", "mcp.json") {
+			projContent = string(f.Content)
+		}
+	}
+	if !strings.Contains(projContent, "usersrv") {
+		t.Fatalf("merged user server missing from project file: %q", projContent)
+	}
+	var sawWarn bool
+	for _, w := range plan.Warnings {
+		if w.Category == "mcp" && w.Action == ir.ActionMerge && strings.Contains(w.Artifact, "usersrv") {
+			sawWarn = true
+		}
+	}
+	if !sawWarn {
+		t.Fatalf("expected isolation-loss merge warning for user server, got %+v", plan.Warnings)
+	}
+}
+
+// Index-only ignore patterns must be honored via .cursorindexingignore (the
+// "both" capability), not collapsed into .cursorignore.
+func TestPlanImportIndexOnlyIgnoreRoutedToIndexingFile(t *testing.T) {
+	a := New()
+	b := ir.NewBundle(ir.Source{Tool: "claude-code"})
+	b.ProjectState.IgnorePatterns = []string{"build/", "*.tmp"}
+	b.ProjectState.IgnoreMode = ir.IgnoreIndex
+	out := t.TempDir()
+	plan := a.PlanImport(b, ir.Context{ProjectPath: out}, adapter.ImportOptions{Categories: map[string]bool{"project-state": true}})
+
+	paths := map[string]string{}
+	for _, f := range plan.Files {
+		rel, _ := filepath.Rel(out, f.Path)
+		paths[rel] = string(f.Content)
+	}
+	if _, ok := paths[".cursorindexingignore"]; !ok {
+		t.Fatalf("index-only patterns not routed to .cursorindexingignore; have %+v", keys2(paths))
+	}
+	if _, ok := paths[".cursorignore"]; ok {
+		t.Fatalf("index-only patterns must not be written as block .cursorignore; have %+v", keys2(paths))
+	}
+	if !strings.Contains(paths[".cursorindexingignore"], "build/") {
+		t.Fatalf("indexing ignore content missing pattern: %q", paths[".cursorindexingignore"])
+	}
+}
+
+// Block-mode ignore still goes to .cursorignore (no regression).
+func TestPlanImportBlockIgnoreRoutedToBlockFile(t *testing.T) {
+	a := New()
+	b := ir.NewBundle(ir.Source{Tool: "claude-code"})
+	b.ProjectState.IgnorePatterns = []string{"secret/"}
+	b.ProjectState.IgnoreMode = ir.IgnoreBlock
+	out := t.TempDir()
+	plan := a.PlanImport(b, ir.Context{ProjectPath: out}, adapter.ImportOptions{Categories: map[string]bool{"project-state": true}})
+
+	var sawBlock bool
+	for _, f := range plan.Files {
+		if f.Path == filepath.Join(out, ".cursorignore") {
+			sawBlock = true
+		}
+		if f.Path == filepath.Join(out, ".cursorindexingignore") {
+			t.Fatalf("block ignore wrongly routed to indexing file")
+		}
+	}
+	if !sawBlock {
+		t.Fatalf("block ignore not written to .cursorignore; files=%+v", plan.Files)
+	}
+}
+
+func keys2(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
 func TestPlanImportSseMcpSupported(t *testing.T) {
 	a := New()
 	b := ir.NewBundle(ir.Source{Tool: "claude-code"})

@@ -285,6 +285,13 @@ func (a AG) PlanImport(b ir.AgentConfigBundle, ctx ir.Context, opts adapter.Impo
 	if opts.Wants("instructions") || opts.Wants("memory") {
 		var projectBodies, memoryBodies []string
 		for _, in := range b.Instructions {
+			// antigravity has no instruction imports (caps.Imports=false): flatten
+			// transclusions inline and warn so nothing is silently dropped.
+			if len(in.Imports) > 0 {
+				in = engine.FlattenInstruction(in)
+				plan.Warnings = append(plan.Warnings, engine.Warn("instructions", from, id, in.Origin, ir.ActionInline,
+					"antigravity has no imports; transclusions flattened inline"))
+			}
 			if in.IsMemory() {
 				memoryBodies = append(memoryBodies, in.Body)
 			} else {
@@ -310,16 +317,30 @@ func (a AG) PlanImport(b ir.AgentConfigBundle, ctx ir.Context, opts adapter.Impo
 	}
 
 	// MCP -> <fuzzydir>/mcp_config.json (serverUrl remap, no comments, drop timeout, no type).
+	// antigravity's serverUrl dialect has no transport discriminator and no SSE
+	// support (caps: stdio+http only); an SSE server would be silently coerced to
+	// an HTTP serverUrl entry, so skip it with a warning instead (never drop).
 	if opts.Wants("mcp") && len(b.McpServers) > 0 {
-		content, err := adapter.RenderMCPServersJSON(b.McpServers, adapter.MCPJSONOptions{
-			RootKey:      "mcpServers",
-			RemoteURLKey: "serverUrl",
-			EmitType:     false,
-			DropTimeout:  true,
-		})
-		if err == nil {
-			plan.Files = append(plan.Files, adapter.PlanFile(
-				filepath.Join(ctx.ProjectPath, dir, "mcp_config.json"), content))
+		var servers []ir.McpServer
+		for _, s := range b.McpServers {
+			if s.Transport == ir.TransportSSE {
+				plan.Warnings = append(plan.Warnings, engine.Warn("mcp", from, id, s.Name, ir.ActionSkip,
+					"antigravity has no SSE transport (serverUrl is HTTP-only); server skipped"))
+				continue
+			}
+			servers = append(servers, s)
+		}
+		if len(servers) > 0 {
+			content, err := adapter.RenderMCPServersJSON(servers, adapter.MCPJSONOptions{
+				RootKey:      "mcpServers",
+				RemoteURLKey: "serverUrl",
+				EmitType:     false,
+				DropTimeout:  true,
+			})
+			if err == nil {
+				plan.Files = append(plan.Files, adapter.PlanFile(
+					filepath.Join(ctx.ProjectPath, dir, "mcp_config.json"), content))
+			}
 		}
 	}
 
@@ -361,8 +382,11 @@ func (a AG) PlanImport(b ir.AgentConfigBundle, ctx ir.Context, opts adapter.Impo
 
 	// Project-state: trust is not writable as a project file -> manual warn.
 	if opts.Wants("project-state") {
-		if len(b.ProjectState.Permissions.Allow) > 0 || len(b.ProjectState.Permissions.Deny) > 0 {
+		if len(b.ProjectState.Permissions.Allow) > 0 || len(b.ProjectState.Permissions.Deny) > 0 || len(b.ProjectState.Permissions.Ask) > 0 {
 			plan.Warnings = append(plan.Warnings, engine.Warn("project-state", from, id, "permissions", ir.ActionSkip, "antigravity has no project permission model"))
+		}
+		if len(b.ProjectState.Hooks) > 0 {
+			plan.Warnings = append(plan.Warnings, engine.Skip("project-state", from, id, "hooks", "antigravity has no hooks model"))
 		}
 		if b.ProjectState.Trust != "" {
 			plan.Warnings = append(plan.Warnings, engine.Warn("project-state", from, id, "trust", ir.ActionManual,

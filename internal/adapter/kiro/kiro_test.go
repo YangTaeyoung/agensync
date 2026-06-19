@@ -262,6 +262,11 @@ func TestPlanImportRoundTrip(t *testing.T) {
 	if strings.Contains(mcp, "\"type\"") {
 		t.Fatalf("mcp.json should not emit type:\n%s", mcp)
 	}
+	// Subagent includeMcpJson extra survives the full export -> IR -> import trip.
+	reviewer := paths[filepath.Join(".kiro", "agents", "reviewer.md")]
+	if !strings.Contains(reviewer, "includeMcpJson") {
+		t.Fatalf("reviewer subagent lost includeMcpJson on round-trip:\n%s", reviewer)
+	}
 }
 
 func TestPlanImportMemoryWritesHomeFile(t *testing.T) {
@@ -369,6 +374,117 @@ func TestUnsupportedCategoriesWarn(t *testing.T) {
 		if !planHas(plan, filepath.Join(out, rel)) {
 			t.Errorf("expected planned file %s; files=%v", rel, planPaths(plan))
 		}
+	}
+}
+
+// Kiro's mcp.json has no transport discriminator, so it cannot honestly claim
+// to represent http distinctly from sse. The capability must not advertise http.
+func TestCapabilitiesNoHTTPTransport(t *testing.T) {
+	c := New().Capabilities()
+	for _, tr := range c.MCP.Transports {
+		if tr == ir.TransportHTTP {
+			t.Fatalf("kiro must not claim http transport (cannot distinguish from sse): %+v", c.MCP.Transports)
+		}
+	}
+	// stdio and sse must still be representable.
+	var hasStdio, hasSSE bool
+	for _, tr := range c.MCP.Transports {
+		switch tr {
+		case ir.TransportStdio:
+			hasStdio = true
+		case ir.TransportSSE:
+			hasSSE = true
+		}
+	}
+	if !hasStdio || !hasSSE {
+		t.Fatalf("kiro should still claim stdio+sse: %+v", c.MCP.Transports)
+	}
+}
+
+// An incoming http MCP server is coerced to a plain url (sse on re-read) because
+// Kiro has no type discriminator; this lossy coercion MUST warn (never silent).
+func TestPlanImportHTTPMcpWarnsTransportLoss(t *testing.T) {
+	a := New()
+	b := ir.NewBundle(ir.Source{Tool: "claude-code"})
+	b.McpServers = []ir.McpServer{
+		{
+			Common:    ir.Common{Scope: ir.ScopeProject},
+			Name:      "httpsrv",
+			Transport: ir.TransportHTTP,
+			URL:       "https://mcp.example.com/mcp",
+			Enabled:   true,
+		},
+		{
+			Common:    ir.Common{Scope: ir.ScopeProject},
+			Name:      "ssesrv",
+			Transport: ir.TransportSSE,
+			URL:       "https://mcp.example.com/sse",
+			Enabled:   true,
+		},
+	}
+	out := t.TempDir()
+	dctx := ir.Context{ProjectPath: out, HomeDir: t.TempDir()}
+	plan := a.PlanImport(b, dctx, adapter.ImportOptions{})
+
+	var transportWarns int
+	for _, w := range plan.Warnings {
+		if w.Category == "mcp" && w.Artifact == "httpsrv" {
+			transportWarns++
+			if w.Action != ir.ActionManual {
+				t.Fatalf("transport-loss warning action=%s, want manual", w.Action)
+			}
+		}
+		// The sse server must NOT warn (it round-trips faithfully).
+		if w.Category == "mcp" && w.Artifact == "ssesrv" {
+			t.Fatalf("sse server should not produce a transport-loss warning: %+v", w)
+		}
+	}
+	if transportWarns != 1 {
+		t.Fatalf("expected exactly one transport-loss warning for httpsrv, got %d: %+v", transportWarns, plan.Warnings)
+	}
+	// Both servers are still written (not dropped).
+	mcpPath := filepath.Join(out, ".kiro", "settings", "mcp.json")
+	var content string
+	for _, f := range plan.Files {
+		if f.Path == mcpPath {
+			content = string(f.Content)
+		}
+	}
+	if content == "" {
+		t.Fatalf("mcp.json not planned: %+v", planPaths(plan))
+	}
+	if !strings.Contains(content, "httpsrv") || !strings.Contains(content, "ssesrv") {
+		t.Fatalf("both servers must be written, not dropped:\n%s", content)
+	}
+}
+
+// includeMcpJson (Extras) must round-trip into subagent frontmatter on import.
+func TestPlanImportSubagentIncludeMcpJsonRoundTrips(t *testing.T) {
+	a := New()
+	b := ir.NewBundle(ir.Source{Tool: "kiro"})
+	b.Subagents = []ir.Subagent{{
+		Common:       ir.Common{ID: "reviewer"},
+		Name:         "reviewer",
+		Description:  "Reviews code",
+		SystemPrompt: "You review code.",
+		Extras:       map[string]any{"includeMcpJson": true},
+	}}
+	out := t.TempDir()
+	dctx := ir.Context{ProjectPath: out, HomeDir: t.TempDir()}
+	plan := a.PlanImport(b, dctx, adapter.ImportOptions{})
+
+	agentPath := filepath.Join(out, ".kiro", "agents", "reviewer.md")
+	var content string
+	for _, f := range plan.Files {
+		if f.Path == agentPath {
+			content = string(f.Content)
+		}
+	}
+	if content == "" {
+		t.Fatalf("reviewer agent not planned: %+v", planPaths(plan))
+	}
+	if !strings.Contains(content, "includeMcpJson") {
+		t.Fatalf("includeMcpJson extra dropped from subagent frontmatter:\n%s", content)
 	}
 }
 

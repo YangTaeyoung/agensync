@@ -230,6 +230,13 @@ func (Aider) PlanImport(b ir.AgentConfigBundle, ctx ir.Context, opts adapter.Imp
 			if !opts.Wants("instructions") {
 				continue
 			}
+			// aider has no instruction imports (Capabilities.Instructions.Imports
+			// == false); flatten transclusions inline so they are not dropped.
+			if len(in.Imports) > 0 {
+				in = engine.FlattenInstruction(in)
+				plan.Warnings = append(plan.Warnings, engine.Warn("instructions", from, id, in.Origin, ir.ActionInline,
+					"aider has no imports; transclusions flattened inline"))
+			}
 			if body := strings.TrimSpace(in.Body); body != "" {
 				sections = append(sections, body)
 			}
@@ -282,7 +289,44 @@ func (Aider) PlanImport(b ir.AgentConfigBundle, ctx ir.Context, opts adapter.Imp
 		}
 	}
 
+	// Project state: aider natively supports an .aiderignore (block mode) but has
+	// no permission/hook/trust model. Honor the declared Ignore:"block" capability
+	// by writing the ignore file; warn on every other project-state attribute so
+	// nothing is silently dropped.
+	if opts.Wants("project-state") {
+		ps := b.ProjectState
+		if len(ps.IgnorePatterns) > 0 {
+			plan.Files = append(plan.Files, adapter.PlanFile(
+				filepath.Join(ctx.ProjectPath, ignoreFile), renderIgnore(ps.IgnorePatterns)))
+			// aider's .aiderignore is block-only; an index-only source ignore must
+			// be collapsed to a block ignore (per §7 ignore-file two-mode → nearest).
+			if ps.IgnoreMode == ir.IgnoreIndex {
+				plan.Warnings = append(plan.Warnings, engine.Warn("project-state", from, id, ignoreFile, ir.ActionInline,
+					"aider .aiderignore is block-only; index-only ignore collapsed to a block ignore"))
+			}
+		}
+		if len(ps.Permissions.Allow) > 0 || len(ps.Permissions.Deny) > 0 || len(ps.Permissions.Ask) > 0 {
+			plan.Warnings = append(plan.Warnings, engine.Skip("project-state", from, id, "permissions",
+				"aider has no permission model"))
+		}
+		if len(ps.Hooks) > 0 {
+			plan.Warnings = append(plan.Warnings, engine.Skip("project-state", from, id, "hooks",
+				"aider has no hook model"))
+		}
+		if ps.Trust != "" {
+			plan.Warnings = append(plan.Warnings, engine.Warn("project-state", from, id, "trust", ir.ActionManual,
+				"aider has no trust model; grant trust manually if the source folder was trusted"))
+		}
+	}
+
 	return plan
+}
+
+// renderIgnore serializes ignore patterns deterministically for .aiderignore.
+func renderIgnore(patterns []string) []byte {
+	sorted := append([]string(nil), patterns...)
+	sort.Strings(sorted)
+	return []byte(strings.Join(sorted, "\n") + "\n")
 }
 
 // renderConfYml produces a .aider.conf.yml that ensures CONVENTIONS.md is in the

@@ -317,6 +317,142 @@ func TestPlanImportMemoryWhenRequested(t *testing.T) {
 	}
 }
 
+// Project-state ignore patterns must be written to .codeiumignore (honoring the
+// declared Ignore:"both" capability), and an index-only mode must collapse to the
+// single block ignore with a structured warning instead of being silently lost.
+func TestPlanImportIgnoreFileWritten(t *testing.T) {
+	a := New()
+	out := t.TempDir()
+	b := ir.NewBundle(ir.Source{Tool: "cursor"})
+	b.ProjectState = ir.ProjectState{
+		IgnorePatterns: []string{"secret.txt", "build/", "node_modules/"},
+		IgnoreMode:     ir.IgnoreIndex,
+	}
+	dctx := ir.Context{ProjectPath: out, HomeDir: t.TempDir()}
+	plan := a.PlanImport(b, dctx, adapter.ImportOptions{Categories: map[string]bool{"project-state": true}})
+
+	var content string
+	var wrote bool
+	for _, f := range plan.Files {
+		if filepath.Base(f.Path) == ".codeiumignore" {
+			wrote = true
+			content = string(f.Content)
+			if rel, _ := filepath.Rel(out, f.Path); rel != ".codeiumignore" {
+				t.Fatalf(".codeiumignore written outside project root: %s", f.Path)
+			}
+		}
+	}
+	if !wrote {
+		t.Fatalf("expected .codeiumignore to be written, files=%+v", plan.Files)
+	}
+	for _, want := range []string{"secret.txt", "build/", "node_modules/"} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("ignore file missing %q:\n%s", want, content)
+		}
+	}
+	// index-only mode must collapse with a warning (never silently dropped).
+	var collapseWarn bool
+	for _, w := range plan.Warnings {
+		if w.Category == "ignore" && strings.Contains(w.Reason, "collapsed") {
+			collapseWarn = true
+		}
+	}
+	if !collapseWarn {
+		t.Fatalf("expected index-only collapse warning, warnings=%+v", plan.Warnings)
+	}
+}
+
+// A block-mode ignore writes the file but must NOT emit a collapse warning.
+func TestPlanImportIgnoreBlockNoCollapseWarn(t *testing.T) {
+	a := New()
+	out := t.TempDir()
+	b := ir.NewBundle(ir.Source{Tool: "cursor"})
+	b.ProjectState = ir.ProjectState{
+		IgnorePatterns: []string{"dist/"},
+		IgnoreMode:     ir.IgnoreBlock,
+	}
+	dctx := ir.Context{ProjectPath: out, HomeDir: t.TempDir()}
+	plan := a.PlanImport(b, dctx, adapter.ImportOptions{Categories: map[string]bool{"project-state": true}})
+	for _, w := range plan.Warnings {
+		if w.Category == "ignore" {
+			t.Fatalf("block-mode ignore should not warn, got %+v", w)
+		}
+	}
+	var wrote bool
+	for _, f := range plan.Files {
+		if filepath.Base(f.Path) == ".codeiumignore" {
+			wrote = true
+		}
+	}
+	if !wrote {
+		t.Fatalf("expected .codeiumignore for block-mode ignore")
+	}
+}
+
+// Project-state permissions/hooks/trust must each emit a structured warning
+// instead of being silently dropped (spec §7 "never silently drop").
+func TestPlanImportProjectStateWarns(t *testing.T) {
+	a := New()
+	from := "claude-code"
+	out := t.TempDir()
+	b := ir.NewBundle(ir.Source{Tool: from})
+	b.ProjectState = ir.ProjectState{
+		Trust:       "trusted",
+		Permissions: ir.Permissions{Allow: []string{"Bash(ls)"}, Deny: []string{"Bash(rm)"}},
+		Hooks:       []ir.Hook{{Event: "PreToolUse", Command: "echo hi"}},
+	}
+	dctx := ir.Context{ProjectPath: out, HomeDir: t.TempDir()}
+	plan := a.PlanImport(b, dctx, adapter.ImportOptions{Categories: map[string]bool{"project-state": true}})
+
+	var perm, hooks, trust bool
+	for _, w := range plan.Warnings {
+		if w.Category != "project-state" {
+			continue
+		}
+		switch w.Artifact {
+		case "permissions":
+			perm = w.Action == ir.ActionSkip
+		case "hooks":
+			hooks = w.Action == ir.ActionSkip
+		case "trust":
+			trust = w.Action == ir.ActionManual
+		}
+	}
+	if !perm {
+		t.Errorf("expected permissions skip warning, warnings=%+v", plan.Warnings)
+	}
+	if !hooks {
+		t.Errorf("expected hooks skip warning, warnings=%+v", plan.Warnings)
+	}
+	if !trust {
+		t.Errorf("expected trust manual warning, warnings=%+v", plan.Warnings)
+	}
+}
+
+// Project-state is only touched when its category is requested.
+func TestPlanImportProjectStateGatedByOpts(t *testing.T) {
+	a := New()
+	out := t.TempDir()
+	b := ir.NewBundle(ir.Source{Tool: "cursor"})
+	b.ProjectState = ir.ProjectState{
+		IgnorePatterns: []string{"x/"},
+		Permissions:    ir.Permissions{Deny: []string{"y"}},
+	}
+	dctx := ir.Context{ProjectPath: out, HomeDir: t.TempDir()}
+	// instructions-only: no project-state work should happen.
+	plan := a.PlanImport(b, dctx, adapter.ImportOptions{Categories: map[string]bool{"instructions": true}})
+	for _, f := range plan.Files {
+		if filepath.Base(f.Path) == ".codeiumignore" {
+			t.Fatalf(".codeiumignore must not be written without project-state opt")
+		}
+	}
+	for _, w := range plan.Warnings {
+		if w.Category == "project-state" || w.Category == "ignore" {
+			t.Fatalf("no project-state warnings expected, got %+v", w)
+		}
+	}
+}
+
 // THE critical test: every category the bundle carries that windsurf can't
 // natively represent must produce a structured warning.
 func TestUnsupportedCategoriesWarn(t *testing.T) {
