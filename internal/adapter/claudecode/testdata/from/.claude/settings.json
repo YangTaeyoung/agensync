@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": ["Bash(ls:*)", "Read"],
+    "deny": ["Bash(rm:*)"],
+    "ask": []
+  },
+  "hooks": {
+    "PostToolUse": [
+      { "matcher": "Edit", "hooks": [{ "type": "command", "command": "gofmt -w ." }] }
+    ]
+  }
+}
