@@ -402,12 +402,13 @@ func (a CC) PlanImport(b ir.AgentConfigBundle, ctx ir.Context, opts adapter.Impo
 		}
 	}
 
-	// MCP (project) -> .mcp.json
+	// MCP: project-scope -> .mcp.json ; user/personal -> ~/.claude.json mcpServers.
+	var userServers []ir.McpServer
 	if opts.Wants("mcp") {
 		var project []ir.McpServer
 		for _, s := range b.McpServers {
 			if s.Scope == ir.ScopeUser {
-				plan.Warnings = append(plan.Warnings, engine.Warn("mcp", from, id, s.Name, ir.ActionMerge, "personal MCP server merged into ~/.claude.json mcpServers"))
+				userServers = append(userServers, s)
 				continue
 			}
 			project = append(project, s)
@@ -417,6 +418,12 @@ func (a CC) PlanImport(b ir.AgentConfigBundle, ctx ir.Context, opts adapter.Impo
 			if err == nil {
 				plan.Files = append(plan.Files, adapter.PlanFile(filepath.Join(ctx.ProjectPath, ".mcp.json"), content))
 			}
+		}
+		if len(userServers) > 0 && ctx.HomeDir == "" {
+			for _, s := range userServers {
+				plan.Warnings = append(plan.Warnings, engine.Skip("mcp", from, id, s.Name, "personal MCP server needs ~/.claude.json but no home dir resolved"))
+			}
+			userServers = nil
 		}
 	}
 
@@ -472,17 +479,91 @@ func (a CC) PlanImport(b ir.AgentConfigBundle, ctx ir.Context, opts adapter.Impo
 	}
 
 	// Project state -> .claude/settings.json (permissions + hooks)
+	var trust string
 	if opts.Wants("project-state") {
 		if content, ok := renderSettings(b.ProjectState); ok {
 			plan.Files = append(plan.Files, adapter.PlanFile(
 				filepath.Join(ctx.ProjectPath, ".claude", "settings.json"), content))
 		}
 		if b.ProjectState.Trust != "" {
-			plan.Warnings = append(plan.Warnings, engine.Warn("project-state", from, id, "trust", ir.ActionManual, "re-grant trust by accepting the trust dialog on first run"))
+			if ctx.HomeDir == "" {
+				plan.Warnings = append(plan.Warnings, engine.Warn("project-state", from, id, "trust", ir.ActionManual, "re-grant trust by accepting the trust dialog on first run"))
+			} else {
+				trust = b.ProjectState.Trust
+				plan.Warnings = append(plan.Warnings, engine.Warn("project-state", from, id, "trust", ir.ActionMerge, "trust written to ~/.claude.json; Claude Code may re-confirm on first run"))
+			}
 		}
 	}
 
+	// Home project-scoped layer (§5): user MCP + trust -> ~/.claude.json,
+	// merged into the single project key — never overwriting the whole blob.
+	if f, ok := planHomeClaudeJSON(ctx, userServers, trust); ok {
+		plan.Files = append(plan.Files, f)
+	}
+
 	return plan
+}
+
+// planHomeClaudeJSON read-modify-writes ~/.claude.json: personal mcpServers
+// (top-level, merged by name) and this project's trust flag under
+// projects["<abs>"], preserving every other key in the file.
+func planHomeClaudeJSON(ctx ir.Context, userServers []ir.McpServer, trust string) (ir.PlannedFile, bool) {
+	if ctx.HomeDir == "" || (len(userServers) == 0 && trust == "") {
+		return ir.PlannedFile{}, false
+	}
+	path := filepath.Join(ctx.HomeDir, ".claude.json")
+	root := map[string]json.RawMessage{}
+	if b, ok := adapter.ReadIfExists(path); ok {
+		_ = json.Unmarshal(b, &root)
+	}
+	if len(userServers) > 0 {
+		servers := map[string]json.RawMessage{}
+		if raw, ok := root["mcpServers"]; ok {
+			_ = json.Unmarshal(raw, &servers)
+		}
+		rendered, err := adapter.RenderMCPServersJSON(userServers, adapter.MCPJSONOptions{RootKey: "mcpServers", RemoteURLKey: "url", EmitType: true})
+		if err == nil {
+			var wrap struct {
+				McpServers map[string]json.RawMessage `json:"mcpServers"`
+			}
+			if json.Unmarshal(rendered, &wrap) == nil {
+				for name, v := range wrap.McpServers {
+					servers[name] = v
+				}
+			}
+		}
+		if b, err := json.Marshal(servers); err == nil {
+			root["mcpServers"] = b
+		}
+	}
+	if trust != "" {
+		abs, _ := filepath.Abs(ctx.ProjectPath)
+		projects := map[string]map[string]json.RawMessage{}
+		if raw, ok := root["projects"]; ok {
+			_ = json.Unmarshal(raw, &projects)
+		}
+		pj := projects[abs]
+		if pj == nil {
+			pj = map[string]json.RawMessage{}
+		}
+		pj["hasTrustDialogAccepted"] = json.RawMessage(boolJSON(trust == "trusted"))
+		projects[abs] = pj
+		if b, err := json.Marshal(projects); err == nil {
+			root["projects"] = b
+		}
+	}
+	out, err := json.MarshalIndent(root, "", "  ")
+	if err != nil {
+		return ir.PlannedFile{}, false
+	}
+	return adapter.PlanFile(path, append(out, '\n')), true
+}
+
+func boolJSON(v bool) string {
+	if v {
+		return "true"
+	}
+	return "false"
 }
 
 func joinBodies(bodies []string) string {
@@ -518,6 +599,9 @@ func renderSettings(ps ir.ProjectState) ([]byte, bool) {
 	if len(perms) > 0 {
 		out["permissions"] = perms
 	}
+	if hooks := renderHooks(ps.Hooks); len(hooks) > 0 {
+		out["hooks"] = hooks
+	}
 	if len(out) == 0 {
 		return nil, false
 	}
@@ -526,4 +610,21 @@ func renderSettings(ps ir.ProjectState) ([]byte, bool) {
 		return nil, false
 	}
 	return append(b, '\n'), true
+}
+
+// renderHooks reconstructs the settings.json "hooks" object from exported
+// Hook records (each carries its original event config as raw JSON).
+func renderHooks(hooks []ir.Hook) map[string]json.RawMessage {
+	if len(hooks) == 0 {
+		return nil
+	}
+	out := map[string]json.RawMessage{}
+	for _, h := range hooks {
+		cfg, _ := h.Raw["config"].(string)
+		if cfg == "" {
+			continue
+		}
+		out[h.Event] = json.RawMessage(cfg)
+	}
+	return out
 }

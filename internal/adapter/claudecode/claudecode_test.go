@@ -133,6 +133,55 @@ func TestPlanImportRoundTrip(t *testing.T) {
 	}
 }
 
+func TestPlanImportSerializesHooks(t *testing.T) {
+	a := New()
+	b := ir.NewBundle(ir.Source{Tool: "claude-code"})
+	b.ProjectState = ir.ProjectState{
+		Permissions: ir.Permissions{Allow: []string{"Read"}},
+		Hooks:       []ir.Hook{{Event: "PostToolUse", Raw: map[string]any{"config": `[{"matcher":"Edit"}]`}}},
+	}
+	out := t.TempDir()
+	plan := a.PlanImport(b, ir.Context{ProjectPath: out}, adapter.ImportOptions{Categories: map[string]bool{"project-state": true}})
+	var settings string
+	for _, f := range plan.Files {
+		if strings.HasSuffix(f.Path, filepath.Join(".claude", "settings.json")) {
+			settings = string(f.Content)
+		}
+	}
+	if !strings.Contains(settings, "hooks") || !strings.Contains(settings, "PostToolUse") {
+		t.Fatalf("hooks not serialized into settings.json:\n%s", settings)
+	}
+}
+
+func TestPlanImportUserMcpAndTrustToHomeJson(t *testing.T) {
+	a := New()
+	home := t.TempDir()
+	proj := t.TempDir()
+	b := ir.NewBundle(ir.Source{Tool: "claude-code"})
+	b.McpServers = []ir.McpServer{
+		{Common: ir.Common{Scope: ir.ScopeUser}, Name: "personal", Transport: ir.TransportStdio, Command: "node", Enabled: true},
+	}
+	b.ProjectState = ir.ProjectState{Trust: "trusted"}
+	plan := a.PlanImport(b, ir.Context{ProjectPath: proj, HomeDir: home}, adapter.ImportOptions{})
+	var homeJSON string
+	for _, f := range plan.Files {
+		if f.Path == filepath.Join(home, ".claude.json") {
+			homeJSON = string(f.Content)
+		}
+	}
+	if homeJSON == "" {
+		t.Fatalf("~/.claude.json not planned: %v", plan.Files)
+	}
+	if !strings.Contains(homeJSON, "personal") || !strings.Contains(homeJSON, "hasTrustDialogAccepted") {
+		t.Fatalf("home json missing personal mcp or trust:\n%s", homeJSON)
+	}
+	// the personal server must NOT have been dropped to nowhere
+	abs, _ := filepath.Abs(proj)
+	if !strings.Contains(homeJSON, abs) {
+		t.Fatalf("home json missing project abs key %q:\n%s", abs, homeJSON)
+	}
+}
+
 func TestPlanImportWritesMemoryWhenRequested(t *testing.T) {
 	a := New()
 	home := t.TempDir()
