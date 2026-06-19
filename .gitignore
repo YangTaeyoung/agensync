@@ -1,0 +1,11 @@
+# Binaries
+/agensync
+/bin/
+
+# Go
+*.test
+*.out
+
+# OS/editor
+.DS_Store
+.idea/
