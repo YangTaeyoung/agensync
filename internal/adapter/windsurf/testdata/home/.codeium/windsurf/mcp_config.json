@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "context7": {
+      "command": "npx",
+      "args": ["-y", "@upstash/context7-mcp"],
+      "env": {
+        "API_KEY": "sk-secret-123"
+      }
+    },
+    "remote-search": {
+      "serverUrl": "https://mcp.example.com/sse"
+    }
+  }
+}
