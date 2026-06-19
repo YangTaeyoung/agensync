@@ -353,7 +353,7 @@ func TestPlanImportIgnoreFileWritten(t *testing.T) {
 	// index-only mode must collapse with a warning (never silently dropped).
 	var collapseWarn bool
 	for _, w := range plan.Warnings {
-		if w.Category == "ignore" && strings.Contains(w.Reason, "collapsed") {
+		if w.Category == "project-state" && strings.Contains(w.Reason, "collapsed") {
 			collapseWarn = true
 		}
 	}
@@ -374,7 +374,7 @@ func TestPlanImportIgnoreBlockNoCollapseWarn(t *testing.T) {
 	dctx := ir.Context{ProjectPath: out, HomeDir: t.TempDir()}
 	plan := a.PlanImport(b, dctx, adapter.ImportOptions{Categories: map[string]bool{"project-state": true}})
 	for _, w := range plan.Warnings {
-		if w.Category == "ignore" {
+		if w.Category == "project-state" && strings.Contains(w.Reason, "collapsed") {
 			t.Fatalf("block-mode ignore should not warn, got %+v", w)
 		}
 	}

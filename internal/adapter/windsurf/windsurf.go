@@ -421,7 +421,7 @@ func (a Windsurf) PlanImport(b ir.AgentConfigBundle, ctx ir.Context, opts adapte
 			plan.Files = append(plan.Files, adapter.PlanFile(
 				filepath.Join(ctx.ProjectPath, ignoreFile), renderIgnore(ps.IgnorePatterns)))
 			if ps.IgnoreMode == ir.IgnoreIndex {
-				plan.Warnings = append(plan.Warnings, engine.Warn("ignore", from, id, ignoreFile, ir.ActionMerge,
+				plan.Warnings = append(plan.Warnings, engine.Warn("project-state", from, id, ignoreFile, ir.ActionMerge,
 					"windsurf has a single .codeiumignore; index-only patterns collapsed to a block ignore"))
 			}
 		}

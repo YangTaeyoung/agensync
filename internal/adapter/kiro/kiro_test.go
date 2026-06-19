@@ -328,12 +328,21 @@ func TestPlanImportHooksWarn(t *testing.T) {
 	out := t.TempDir()
 	dctx := ir.Context{ProjectPath: out, HomeDir: t.TempDir()}
 	plan := a.PlanImport(b, dctx, adapter.ImportOptions{})
-	if !hasWarning(plan.Warnings, "hooks") {
+	if !hasWarningArtifact(plan.Warnings, "project-state", "hooks") {
 		t.Fatalf("expected hooks warning: %+v", plan.Warnings)
 	}
-	if !hasWarning(plan.Warnings, "permissions") {
+	if !hasWarningArtifact(plan.Warnings, "project-state", "permissions") {
 		t.Fatalf("expected permissions warning: %+v", plan.Warnings)
 	}
+}
+
+func hasWarningArtifact(ws []ir.Warning, cat, artifact string) bool {
+	for _, w := range ws {
+		if w.Category == cat && w.Artifact == artifact {
+			return true
+		}
+	}
+	return false
 }
 
 // The critical requirement: feed a bundle containing every category and assert a

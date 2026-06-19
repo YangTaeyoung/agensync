@@ -412,10 +412,10 @@ func (Kiro) PlanImport(b ir.AgentConfigBundle, ctx ir.Context, opts adapter.Impo
 		ps := b.ProjectState
 		if len(ps.Permissions.Allow) > 0 || len(ps.Permissions.Deny) > 0 || len(ps.Permissions.Ask) > 0 {
 			plan.Warnings = append(plan.Warnings,
-				engine.Skip("permissions", from, id, "permissions", "kiro has no project permission model"))
+				engine.Skip("project-state", from, id, "permissions", "kiro has no project permission model"))
 		}
 		if len(ps.Hooks) > 0 {
-			plan.Warnings = append(plan.Warnings, engine.Warn("hooks", from, id, "hooks", ir.ActionManual,
+			plan.Warnings = append(plan.Warnings, engine.Warn("project-state", from, id, "hooks", ir.ActionManual,
 				"kiro global hooks are unreliable; configure manually"))
 		}
 	}

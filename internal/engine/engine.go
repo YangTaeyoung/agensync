@@ -12,8 +12,22 @@ func Export(src adapter.ToolAdapter, ctx ir.Context, opts adapter.ImportOptions)
 	b := ir.NewBundle(ir.Source{Tool: src.Meta().ID, Version: src.Meta().DisplayName, ProjectPath: ctx.ProjectPath})
 	var err error
 	if opts.Wants("instructions") || opts.Wants("memory") {
-		if b.Instructions, err = src.ExportInstructions(ctx); err != nil {
+		all, err := src.ExportInstructions(ctx)
+		if err != nil {
 			return b, err
+		}
+		// Keep only the requested scope(s): project-scope under "instructions",
+		// user/enterprise-scope (personal memory) under "memory". This prevents a
+		// target from receiving — and having to silently drop — instructions the
+		// user did not ask to migrate.
+		for _, in := range all {
+			if in.IsMemory() {
+				if opts.Wants("memory") {
+					b.Instructions = append(b.Instructions, in)
+				}
+			} else if opts.Wants("instructions") {
+				b.Instructions = append(b.Instructions, in)
+			}
 		}
 	}
 	if opts.Wants("mcp") {

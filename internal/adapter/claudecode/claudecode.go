@@ -599,7 +599,7 @@ func renderSettings(ps ir.ProjectState) ([]byte, bool) {
 	if len(perms) > 0 {
 		out["permissions"] = perms
 	}
-	if hooks := renderHooks(ps.Hooks); len(hooks) > 0 {
+	if hooks := renderHooks(ps.Hooks); hooks != nil {
 		out["hooks"] = hooks
 	}
 	if len(out) == 0 {
@@ -612,19 +612,34 @@ func renderSettings(ps ir.ProjectState) ([]byte, bool) {
 	return append(b, '\n'), true
 }
 
-// renderHooks reconstructs the settings.json "hooks" object from exported
-// Hook records (each carries its original event config as raw JSON).
-func renderHooks(hooks []ir.Hook) map[string]json.RawMessage {
+// renderHooks reconstructs the settings.json "hooks" object from exported Hook
+// records. Claude Code's own export carries the original event config as raw
+// JSON in Raw["config"]; hooks from other tools use the IR-canonical
+// Event/Command fields, which are reconstructed into the matcher/command shape.
+func renderHooks(hooks []ir.Hook) map[string]any {
 	if len(hooks) == 0 {
 		return nil
 	}
-	out := map[string]json.RawMessage{}
+	out := map[string]any{}
 	for _, h := range hooks {
-		cfg, _ := h.Raw["config"].(string)
-		if cfg == "" {
-			continue
+		if cfg, ok := h.Raw["config"].(string); ok && cfg != "" {
+			var v any
+			if json.Unmarshal([]byte(cfg), &v) == nil {
+				out[h.Event] = v
+				continue
+			}
 		}
-		out[h.Event] = json.RawMessage(cfg)
+		if h.Command != "" {
+			entry := map[string]any{"hooks": []any{map[string]any{"type": "command", "command": h.Command}}}
+			if existing, ok := out[h.Event].([]any); ok {
+				out[h.Event] = append(existing, entry)
+			} else {
+				out[h.Event] = []any{entry}
+			}
+		}
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }

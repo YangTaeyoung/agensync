@@ -501,7 +501,7 @@ func TestProjectStateHooksAndTrustWarn(t *testing.T) {
 
 	var hooksWarn, trustWarn bool
 	for _, w := range plan.Warnings {
-		if w.Category == "hooks" && strings.Contains(w.Reason, "hooks") {
+		if w.Category == "project-state" && w.Artifact == "hooks" {
 			hooksWarn = true
 		}
 		if w.Category == "project-state" && w.Artifact == "trust" {

@@ -375,9 +375,15 @@ func mcpAttrLoss(s ir.McpServer, from string) []ir.Warning {
 		add("codex MCP TOML cannot express tool filters; dropped")
 	}
 	// Remote headers other than an externalized Authorization are not representable.
-	for k, v := range s.Headers {
+	// Iterate in sorted order so the warning report is deterministic.
+	keys := make([]string, 0, len(s.Headers))
+	for k := range s.Headers {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
 		if strings.EqualFold(k, "Authorization") {
-			if !secret.LooksLikeSecret(v) {
+			if !secret.LooksLikeSecret(s.Headers[k]) {
 				add("codex represents only secret bearer tokens; non-secret Authorization header dropped")
 			}
 			continue

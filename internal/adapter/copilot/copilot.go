@@ -558,7 +558,7 @@ func (Copilot) planProjectState(b ir.AgentConfigBundle, ctx ir.Context, opts ada
 	// file-based trust flag: never silently drop these — emit one structured
 	// warning each instead (§7).
 	if len(b.ProjectState.Hooks) > 0 {
-		plan.Warnings = append(plan.Warnings, engine.Warn("hooks", from, id, "hooks", ir.ActionManual,
+		plan.Warnings = append(plan.Warnings, engine.Warn("project-state", from, id, "hooks", ir.ActionManual,
 			"copilot has no hooks model; configure manually"))
 	}
 	if b.ProjectState.Trust != "" {

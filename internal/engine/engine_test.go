@@ -79,3 +79,30 @@ func TestExportMemoryCategoryPullsInstructions(t *testing.T) {
 		t.Fatalf("memory instruction not exported: %+v", b.Instructions)
 	}
 }
+
+// Export must keep only the requested instruction scope, so a target never has
+// to silently drop out-of-scope (e.g. personal-memory) instructions.
+func TestExportFiltersInstructionsByScope(t *testing.T) {
+	src := stubAdapter{
+		id: "src",
+		instr: []ir.Instruction{
+			{Common: ir.Common{ID: "proj", Scope: ir.ScopeProject, Body: "project"}},
+			{Common: ir.Common{ID: "mem", Scope: ir.ScopeUser, Body: "memory"}},
+		},
+	}
+	// only instructions -> memory record excluded
+	b, _ := Export(src, ir.Context{}, adapter.ImportOptions{Categories: map[string]bool{"instructions": true}})
+	if len(b.Instructions) != 1 || b.Instructions[0].IsMemory() {
+		t.Fatalf("instructions-only should exclude memory: %+v", b.Instructions)
+	}
+	// only memory -> project record excluded
+	b, _ = Export(src, ir.Context{}, adapter.ImportOptions{Categories: map[string]bool{"memory": true}})
+	if len(b.Instructions) != 1 || !b.Instructions[0].IsMemory() {
+		t.Fatalf("memory-only should exclude project: %+v", b.Instructions)
+	}
+	// all -> both
+	b, _ = Export(src, ir.Context{}, adapter.ImportOptions{})
+	if len(b.Instructions) != 2 {
+		t.Fatalf("all should include both: %+v", b.Instructions)
+	}
+}

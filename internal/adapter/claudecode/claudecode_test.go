@@ -153,6 +153,25 @@ func TestPlanImportSerializesHooks(t *testing.T) {
 	}
 }
 
+// Hooks from a non-claude source use the IR-canonical Event/Command fields and
+// must be reconstructed into settings.json (never silently dropped).
+func TestPlanImportReconstructsCommandHook(t *testing.T) {
+	a := New()
+	b := ir.NewBundle(ir.Source{Tool: "cursor"})
+	b.ProjectState = ir.ProjectState{Hooks: []ir.Hook{{Event: "PreToolUse", Command: "echo hi"}}}
+	out := t.TempDir()
+	plan := a.PlanImport(b, ir.Context{ProjectPath: out}, adapter.ImportOptions{Categories: map[string]bool{"project-state": true}})
+	var settings string
+	for _, f := range plan.Files {
+		if strings.HasSuffix(f.Path, filepath.Join(".claude", "settings.json")) {
+			settings = string(f.Content)
+		}
+	}
+	if !strings.Contains(settings, "PreToolUse") || !strings.Contains(settings, "echo hi") {
+		t.Fatalf("command hook not reconstructed:\n%s", settings)
+	}
+}
+
 func TestPlanImportUserMcpAndTrustToHomeJson(t *testing.T) {
 	a := New()
 	home := t.TempDir()
