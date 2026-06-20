@@ -1,0 +1,14 @@
+{
+  // Antigravity allows comments in its MCP config.
+  "mcpServers": {
+    "ctx7": {
+      "command": "npx",
+      "args": ["-y", "@upstash/context7-mcp"],
+      "timeout": 30000
+    },
+    "figma": {
+      "serverUrl": "https://mcp.figma.com/sse",
+      "headers": { "Authorization": "Bearer figd-token" }
+    }
+  }
+}

@@ -1,0 +1,4 @@
+---
+description: Use this rule when writing database migrations.
+---
+Wrap every migration in a transaction and make it reversible.

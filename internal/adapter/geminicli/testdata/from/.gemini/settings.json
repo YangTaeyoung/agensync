@@ -1,0 +1,21 @@
+{
+  "theme": "Default",
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
+      "env": {
+        "LOG_LEVEL": "debug"
+      }
+    },
+    "remote-http": {
+      "httpUrl": "https://api.example.com/mcp"
+    },
+    "remote-sse": {
+      "url": "https://sse.example.com/mcp"
+    }
+  },
+  "telemetry": {
+    "enabled": false
+  }
+}

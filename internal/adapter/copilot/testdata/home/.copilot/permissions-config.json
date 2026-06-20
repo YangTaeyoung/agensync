@@ -1,0 +1,4 @@
+{
+  "allow": ["Bash(git status)", "Read(*)"],
+  "deny": ["Bash(rm -rf /)"]
+}

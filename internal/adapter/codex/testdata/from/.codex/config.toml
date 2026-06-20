@@ -1,0 +1,7 @@
+[mcp_servers.ctx7]
+command = "npx"
+args = ["-y", "@upstash/context7-mcp"]
+
+[mcp_servers.figma]
+url = "https://mcp.figma.com"
+bearer_token_env_var = "FIGMA_TOKEN"

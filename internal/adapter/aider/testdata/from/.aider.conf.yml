@@ -1,0 +1,4 @@
+read:
+  - CONVENTIONS.md
+  - docs/STYLE.md
+auto-commits: false

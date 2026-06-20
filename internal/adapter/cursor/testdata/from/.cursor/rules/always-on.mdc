@@ -1,0 +1,4 @@
+---
+alwaysApply: true
+---
+This rule is always applied to every request.

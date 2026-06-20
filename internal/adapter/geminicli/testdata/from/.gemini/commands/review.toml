@@ -1,0 +1,6 @@
+description = "Review the staged diff for bugs"
+prompt = """
+You are a meticulous code reviewer. Review the following changes: {{args}}
+
+Point out correctness bugs first, then style issues.
+"""
