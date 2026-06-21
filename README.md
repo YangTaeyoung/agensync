@@ -1,119 +1,173 @@
-# agensync
+<div align="center">
 
-Clone or migrate a project's **AI-coding-agent configuration** from one tool to
-one or more others — instructions, MCP servers, skills, commands, subagents,
-project state, and personal/global **memory** — across both project-local files
-and home-directory project-scoped settings.
+# 🔄 agensync
 
-Set up your conventions once in (say) Claude Code, then carry the same
-experience into Codex, Cursor, Gemini CLI, Kiro, Copilot, and more.
+### One config. Every AI coding agent.
 
-## Install
+**Clone or migrate your AI-coding-agent setup — instructions, MCP servers, skills, commands, subagents, and personal memory — between Claude Code, Codex, Cursor, Gemini CLI, and 6 more.**
+
+[![Go Reference](https://pkg.go.dev/badge/github.com/YangTaeyoung/agensync.svg)](https://pkg.go.dev/github.com/YangTaeyoung/agensync)
+[![Go Report Card](https://goreportcard.com/badge/github.com/YangTaeyoung/agensync)](https://goreportcard.com/report/github.com/YangTaeyoung/agensync)
+[![CI](https://img.shields.io/github/actions/workflow/status/YangTaeyoung/agensync/ci.yml?branch=main&label=ci)](https://github.com/YangTaeyoung/agensync/actions)
+[![Release](https://img.shields.io/github/v/release/YangTaeyoung/agensync?include_prereleases&sort=semver)](https://github.com/YangTaeyoung/agensync/releases)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/YangTaeyoung/agensync)](go.mod)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+**English** · [한국어](./README.ko.md)
+
+</div>
+
+---
+
+You set up your conventions, MCP servers, and skills once in (say) **Claude Code** — then your teammate uses **Cursor**, your CI uses **Codex**, and you're trying **Gemini CLI** on the side. `agensync` carries the same experience across all of them, **non-destructively**.
+
+```console
+$ agensync migrate --from claude-code --to codex,cursor --apply
+
+Plan for codex:
+  + AGENTS.md (new file, 412 bytes)
+  + .codex/config.toml (new file, 198 bytes)
+  + .env (new file, 64 bytes)
+  warn: [mcp] claude-code→codex "figma": manual (inline secret externalized to env var FIGMA_TOKEN)
+Plan for cursor:
+  + AGENTS.md (new file, 412 bytes)
+  + .cursor/mcp.json (new file, 233 bytes)
+
+applied to codex: 3 written, 1 backed up, 0 skipped
+applied to cursor: 2 written, 0 backed up, 0 skipped
+  → Codex: grant trust for this folder before first run
+```
+
+## ✨ Why agensync
+
+- 🧠 **Migrates everything that matters** — instructions, MCP servers, skills, commands, subagents, project permissions/hooks/trust, and **personal/global memory**.
+- 🗂️ **Two layers** — both project-local files *and* the per-project settings tools stash in your home dir (e.g. `~/.claude.json`).
+- 🔐 **Secret-safe** — inline API tokens are **never** re-serialized as plaintext; they're externalized to an env-var reference + a `.env` stub.
+- 🚨 **Never silently drops** — anything a target can't represent produces one structured warning in the migration report. Guaranteed by a standing test across every adapter.
+- 🧪 **Dry-run by default** — preview a full diff + loss report before anything is written; every overwrite is backed up to `.bak`.
+- 🎛️ **Interactive or scripted** — a Bubble Tea TUI, or fully-flagged non-interactive flags for CI.
+- 🧩 **Adapter-per-tool** — a shared canonical IR means coverage grows by adding adapters, not N×N converters.
+
+## 🚀 Install
 
 ```bash
 go install github.com/YangTaeyoung/agensync/cmd/agensync@latest
 ```
 
-Requires Go 1.26+.
+…or grab a prebuilt binary from the [latest release](https://github.com/YangTaeyoung/agensync/releases/latest). Requires Go 1.26+ to build from source.
 
-## Usage
-
-Run from your project root.
-
-### Interactive
+## ⚡ Quickstart
 
 ```bash
+# 1. See which tools are configured here
+agensync detect
+
+# 2. Preview a migration (dry-run is the default — writes nothing)
+agensync migrate --from claude-code --to codex
+
+# 3. Apply it (with automatic .bak backups)
+agensync migrate --from claude-code --to codex,cursor --apply
+
+# 4. Or just run it interactively
 agensync
 ```
 
-Walks you through: **From** tool → **To** tool(s) → categories → plan preview
-(with a loss/transformation report) → per-conflict decisions → apply (with
-automatic `.bak` backups and post-migration "grant trust" guidance).
+<div align="center">
 
-### Non-interactive
+`From` → `To (multi-select)` → `Categories` → **Plan preview + loss report** → per-conflict choice → **Apply**
+
+</div>
+
+## 🧰 Supported tools
+
+| Tool | `id` | Tier | Notes |
+|---|---|:--:|---|
+| Claude Code | `claude-code` | 🟢 high | canonical source — `~/.claude.json` two-layer |
+| Codex CLI | `codex` | 🟢 high | JSON/MD → TOML, env-indirect secrets |
+| Kiro | `kiro` | 🟢 high | `inclusion` steering, `#[[file:]]` embeds |
+| GitHub Copilot | `copilot` | 🟢 high | CLI surface, `.agent.md`, `applyTo` globs |
+| Cursor | `cursor` | 🟢 high | `.mdc` rules, User-Rules paste-in |
+| Gemini CLI | `gemini-cli` | 🟢 high | TOML commands, `httpUrl` MCP |
+| Antigravity | `antigravity` | 🟡 medium | fuzzy paths, `serverUrl`, no comments |
+| Windsurf / Devin | `windsurf` | 🟡 medium | global-only MCP, char caps |
+| Cline | `cline` | 🟡 medium | global-only MCP, `/name.md` workflows |
+| Aider | `aider` | 🔵 limited | instructions-only target |
+
+*Tier = format stability/confidence. Medium-tier adapters use fuzzy path matching + fallbacks.*
+
+## 🧠 Personal memory
+
+Your global memory (e.g. `~/.claude/CLAUDE.md`) travels with you. agensync models it as user-scope instructions and writes it to each tool's global memory file via the `memory` category:
 
 ```bash
-# Detect which tools are configured in this project / your home dir
-agensync detect
-
-# Plan only (default is dry-run — writes nothing)
-agensync migrate --from claude-code --to codex --dry-run
-
-# Migrate selected categories to several tools and apply
-agensync migrate --from claude-code --to codex,cursor --only mcp,instructions --apply
-
-# Carry your personal/global memory across (user-scope instruction files)
-agensync migrate --from claude-code --to codex --only memory --apply
-
-# Write the structured migration report to a file
-agensync migrate --from claude-code --to kiro --report report.txt
+agensync migrate --from claude-code --to codex,gemini-cli --only memory --apply
+# ~/.claude/CLAUDE.md → ~/.codex/AGENTS.md + ~/.gemini/GEMINI.md
 ```
 
-### Flags
+Where memory is opaque or UI-only (Cursor User Rules, Windsurf auto-memories, Aider), agensync **warns and preserves the content for manual paste-in** instead of dropping it.
 
-| Flag | Meaning |
+## 🛡️ Safety
+
+| Guarantee | How |
 |---|---|
-| `--from <id>` | source tool |
-| `--to <ids>` | comma-separated targets |
-| `--only <cats>` / `--skip <cats>` | category filter |
-| `--dry-run` | plan only (default) |
-| `--apply` / `--yes` | write files |
-| `--on-conflict skip\|overwrite\|merge\|suffix` | conflict policy |
-| `--no-backup` | don't create `.bak` files |
-| `--home <dir>` / `--project <dir>` | override resolved paths |
-| `--report <path>` | write the migration report |
+| **Dry-run by default** | writes require `--apply`/`--yes` or interactive confirmation |
+| **Backups** | every overwrite → `<file>.bak`; the *original* is preserved even across multi-target runs |
+| **No plaintext secrets** | inline tokens → env-var reference + `.env` stub + warning (enforced by a standing leak test) |
+| **Trust gating** | tools that ignore untrusted folders get an explicit "grant trust" step |
+| **Never silently drop** | every unrepresentable category → one structured warning in the report |
 
-**Categories:** `instructions`, `mcp`, `skills`, `commands`, `subagents`,
-`project-state`, `memory`.
+## 🏗️ How it works
 
-## Supported tools
+Every tool maps to/from a shared canonical IR (`AgentConfigBundle`), so there are no pairwise converters — just adapters.
 
-| Tool (`id`) | Tier / confidence |
-|---|---|
-| Claude Code (`claude-code`) | Tier 1 — high |
-| Codex CLI (`codex`) | Tier 1 — high |
-| Kiro (`kiro`) | Tier 1 — high |
-| GitHub Copilot (`copilot`) | Tier 1 — high |
-| Cursor (`cursor`) | Tier 1 — high |
-| Gemini CLI (`gemini-cli`) | Tier 1 — high |
-| Antigravity (`antigravity`) | Tier 2 — medium (fuzzy paths) |
-| Windsurf / Devin (`windsurf`) | Tier 2 — medium |
-| Cline (`cline`) | Tier 2 — medium |
-| Aider (`aider`) | Tier 3 — instructions-only |
-
-Confidence reflects format stability. Tier 2/3 tools use fuzzy path matching and
-fallbacks; Aider and Windsurf are instructions-mostly targets.
-
-## Personal memory
-
-Your user/global memory (e.g. `~/.claude/CLAUDE.md`) is migrated as user-scope
-instructions to each target's global memory file
-(`~/.codex/AGENTS.md`, `~/.gemini/GEMINI.md`, Windsurf `global_rules.md`,
-Cline `~/Documents/Cline/Rules/`, …) via the `memory` category. Where memory is
-opaque or UI-only (Cursor User Rules, Windsurf auto-memories), agensync **warns
-and preserves the content for manual paste-in** rather than silently dropping it.
-
-## Safety
-
-- **Dry-run by default.** Writes require `--apply`/`--yes` or interactive confirmation.
-- **Backups.** Every overwritten file is copied to `<file>.bak` (the original is
-  preserved even across multi-target runs). Toggle with `--no-backup`.
-- **Secrets are never written as plaintext.** Inline tokens in source MCP configs
-  are externalized to an env-var reference plus a `.env` stub, with a warning.
-- **Trust gating.** Tools that ignore project config until the folder is trusted
-  (Codex, Antigravity, …) get an explicit post-migration "grant trust" step.
-- **Never silently drop.** Every category a target can't represent produces one
-  structured warning in the migration report.
-
-## How it works
-
-Every tool maps to/from a shared canonical IR (`AgentConfigBundle`) via an
-adapter, so coverage grows by adding adapters rather than N×N converters. A
-capability-driven engine plans the target writes and emits structured loss
-warnings; the plan/apply layer renders diffs and writes with backups.
-
-```
-[From files] --adapter.export--> IR --capability/gotcha engine--> WritePlan --apply--> [To files]
+```mermaid
+flowchart LR
+    A["From tool<br/>(native files)"] -->|adapter.export| IR["AgentConfigBundle<br/>(canonical IR)"]
+    IR -->|capability + gotcha engine| WP["WritePlan<br/>(+ loss warnings)"]
+    WP -->|apply: dry-run / backup / conflict| B["To tool(s)<br/>(native files)"]
+    C1(["source Capabilities()"]) -.-> IR
+    C2(["target Capabilities()"]) -.-> WP
 ```
 
-See `docs/specs/2026-06-19-agensync-design.md` for the full design.
+<details>
+<summary><b>CLI reference</b></summary>
+
+```text
+agensync detect                       list tools detected in project + home
+agensync migrate [flags]              migrate from one tool to one or more others
+agensync                              interactive TUI
+
+Flags:
+  --from <id>                         source tool
+  --to <ids>                          comma-separated targets
+  --only <cats> / --skip <cats>       category filter
+  --dry-run                           plan only (default)
+  --apply, --yes                      write files
+  --on-conflict skip|overwrite|merge|suffix
+  --no-backup                         don't write .bak files
+  --home <dir> / --project <dir>      override resolved paths
+  --report <path>                     write the migration report
+```
+
+**Categories:** `instructions` · `mcp` · `skills` · `commands` · `subagents` · `project-state` · `memory`
+
+</details>
+
+## 🤝 Contributing
+
+Adding a tool = adding an adapter. Implement the `ToolAdapter` interface in `internal/adapter/<tool>/`, declare honest `Capabilities()`, and add golden-file tests. The reference adapters (`claudecode`, `codex`) show the two patterns: native MD/JSON and format-transform.
+
+```bash
+go test ./...
+go vet ./...
+```
+
+## 📄 License
+
+[MIT](LICENSE) © [YangTaeyoung](https://github.com/YangTaeyoung)
+
+---
+
+<div align="center">
+<sub>Built with Go · cobra · bubbletea · go-toml · goccy/go-yaml</sub>
+</div>
