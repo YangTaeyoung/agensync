@@ -68,9 +68,14 @@ agensync migrate --from claude-code --to codex
 # 3. 실제 적용 (.bak 백업 자동 생성)
 agensync migrate --from claude-code --to codex,cursor --apply
 
-# 4. 또는 그냥 대화형으로 실행
+# 4. 모노레포? .git 루트를 찾아 중첩된 모든 프로젝트를 제자리에서 이관
+agensync migrate --from claude-code --to gemini-cli --recursive --apply
+
+# 5. 또는 그냥 대화형으로 실행
 agensync
 ```
+
+> **재귀 모드**(`-r`/`--recursive`)는 `.git` 루트까지 올라간 뒤, 소스 설정이 있는 모든 중첩 디렉터리를 제자리에서 이관합니다(예: `services/api/CLAUDE.md` → `services/api/AGENTS.md`). 의존성/VCS/숨김 디렉터리(`node_modules`, `.git`, `.claude` 등)는 건너뛰고, 홈 디렉터리 메모리 레이어는 한 번만 이관합니다.
 
 <div align="center">
 
@@ -145,6 +150,7 @@ agensync                              대화형 TUI
   --apply, --yes                      파일 기록
   --on-conflict skip|overwrite|merge|suffix
   --no-backup                         .bak 파일 생성 안 함
+  -r, --recursive                     프로젝트 루트(.git)를 찾아 중첩된 모든 프로젝트를 제자리에서 이관
   --home <dir> / --project <dir>      경로 재정의
   --report <path>                     마이그레이션 리포트 기록
 ```

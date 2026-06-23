@@ -93,6 +93,53 @@ func TestMigrateApplyWritesAndBacks(t *testing.T) {
 	}
 }
 
+func TestMigrateRecursiveMonorepo(t *testing.T) {
+	root := t.TempDir()
+	os.MkdirAll(filepath.Join(root, ".git"), 0o755)
+	write := func(rel string) {
+		p := filepath.Join(root, rel)
+		os.MkdirAll(filepath.Dir(p), 0o755)
+		os.WriteFile(p, []byte("# rules\n"), 0o644)
+	}
+	write("CLAUDE.md")
+	write("services/a/CLAUDE.md")
+	write("services/b/CLAUDE.md")
+
+	var out bytes.Buffer
+	// run from a nested dir: recursive must resolve the .git root, then migrate
+	// every nested claude-code project in place.
+	err := Run([]string{
+		"migrate", "--from", "claude-code", "--to", "codex", "--recursive",
+		"--project", filepath.Join(root, "services", "a"), "--home", t.TempDir(),
+		"--apply", "--only", "instructions",
+	}, &out)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out.String())
+	}
+	for _, rel := range []string{"AGENTS.md", "services/a/AGENTS.md", "services/b/AGENTS.md"} {
+		if _, err := os.Stat(filepath.Join(root, rel)); err != nil {
+			t.Errorf("expected %s to be migrated in place: %v", rel, err)
+		}
+	}
+}
+
+func TestDetectRecursiveResolvesRootAndScans(t *testing.T) {
+	root := t.TempDir()
+	os.MkdirAll(filepath.Join(root, ".git"), 0o755)
+	p := filepath.Join(root, "svc", "x", "CLAUDE.md")
+	os.MkdirAll(filepath.Dir(p), 0o755)
+	os.WriteFile(p, []byte("# hi\n"), 0o644)
+
+	var out bytes.Buffer
+	err := Run([]string{"detect", "--recursive", "--project", filepath.Join(root, "svc", "x"), "--home", t.TempDir()}, &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "claude-code") || !strings.Contains(out.String(), filepath.Join("svc", "x")) {
+		t.Fatalf("recursive detect should resolve root and list nested project:\n%s", out.String())
+	}
+}
+
 func TestReportFlagWritesFile(t *testing.T) {
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "CLAUDE.md"), []byte("# Guidelines\n"), 0o644)

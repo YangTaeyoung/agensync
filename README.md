@@ -68,9 +68,14 @@ agensync migrate --from claude-code --to codex
 # 3. Apply it (with automatic .bak backups)
 agensync migrate --from claude-code --to codex,cursor --apply
 
-# 4. Or just run it interactively
+# 4. Monorepo? Resolve the .git root and migrate every nested project in place
+agensync migrate --from claude-code --to gemini-cli --recursive --apply
+
+# 5. Or just run it interactively
 agensync
 ```
+
+> **Recursive mode** (`-r`/`--recursive`) walks up to your `.git` root, then migrates every nested directory that has source config (e.g. `services/api/CLAUDE.md` → `services/api/AGENTS.md`). Dependency/VCS/hidden dirs (`node_modules`, `.git`, `.claude`, …) are skipped; the home-dir memory layer is migrated once.
 
 <div align="center">
 
@@ -145,6 +150,7 @@ Flags:
   --apply, --yes                      write files
   --on-conflict skip|overwrite|merge|suffix
   --no-backup                         don't write .bak files
+  -r, --recursive                     resolve the project root (.git) and migrate every nested project in place
   --home <dir> / --project <dir>      override resolved paths
   --report <path>                     write the migration report
 ```

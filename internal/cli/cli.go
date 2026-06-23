@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -116,6 +118,7 @@ func resolveContext(project, home string) (ir.Context, error) {
 
 func detectCmd(out io.Writer) *cobra.Command {
 	var project, home string
+	var recursive bool
 	cmd := &cobra.Command{
 		Use:   "detect",
 		Short: "List AI-coding tools detected in the project and home",
@@ -125,6 +128,9 @@ func detectCmd(out io.Writer) *cobra.Command {
 				return err
 			}
 			reg := all.Default()
+			if recursive {
+				return detectRecursive(out, reg, ctx)
+			}
 			found := 0
 			for _, id := range reg.IDs() {
 				a, _ := reg.Get(id)
@@ -142,7 +148,39 @@ func detectCmd(out io.Writer) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&project, "project", "", "project root (default: cwd)")
 	cmd.Flags().StringVar(&home, "home", "", "home dir (default: $HOME)")
+	cmd.Flags().BoolVarP(&recursive, "recursive", "r", false, "resolve the project root and scan nested directories")
 	return cmd
+}
+
+// detectRecursive resolves the project root (nearest .git ancestor) and lists,
+// per nested directory, which tools have project-scope config there.
+func detectRecursive(out io.Writer, reg *adapter.Registry, ctx ir.Context) error {
+	root := engine.FindProjectRoot(ctx.ProjectPath, ctx.HomeDir)
+	byDir := map[string][]string{}
+	for _, id := range reg.IDs() {
+		a, _ := reg.Get(id)
+		for _, dir := range engine.DiscoverProjectDirs(root, a) {
+			byDir[dir] = append(byDir[dir], id)
+		}
+	}
+	if len(byDir) == 0 {
+		fmt.Fprintf(out, "No AI-coding tools detected under %s.\n", root)
+		return nil
+	}
+	dirs := make([]string, 0, len(byDir))
+	for dir := range byDir {
+		dirs = append(dirs, dir)
+	}
+	sort.Strings(dirs)
+	fmt.Fprintf(out, "project root: %s\n", root)
+	for _, dir := range dirs {
+		rel, _ := filepath.Rel(root, dir)
+		if rel == "." {
+			rel = "(root)"
+		}
+		fmt.Fprintf(out, "  %-28s %s\n", rel, strings.Join(byDir[dir], ", "))
+	}
+	return nil
 }
 
 func evidenceScopes(res ir.DetectionResult) []string {
@@ -161,6 +199,7 @@ func migrateCmd(out io.Writer) *cobra.Command {
 		from, to, only, skip, onConflict string
 		project, home, report            string
 		dryRun, yes, apply, noBackup     bool
+		recursive                        bool
 	)
 	cmd := &cobra.Command{
 		Use:   "migrate",
@@ -187,31 +226,45 @@ func migrateCmd(out io.Writer) *cobra.Command {
 				return err
 			}
 			opts := adapter.ImportOptions{Categories: cats, OnConflict: parseAction(onConflict)}
-
-			bundle, err := engine.Export(src, ctx, opts)
-			if err != nil {
-				return fmt.Errorf("export from %s: %w", from, err)
-			}
-
 			doApply := apply || yes
 			_ = dryRun // dry-run is the default; --apply/--yes opts into writes
 
 			var rep strings.Builder
-			for _, id := range targets {
-				dst, _ := reg.Get(id)
-				p := engine.Plan(dst, bundle, ctx, opts)
-				section := plan.RenderDiff(p)
-				fmt.Fprint(out, section)
-				rep.WriteString(section)
-
-				if doApply {
-					res := dst.Apply(p, adapter.ApplyOptions{DryRun: false, Backup: !noBackup, OnConflict: parseAction(onConflict)})
-					summary := renderApply(id, res)
-					fmt.Fprint(out, summary)
-					rep.WriteString(summary)
-					emitTrustGuidance(out, dst, p)
+			runFor := func(c ir.Context, label string) error {
+				if label != "" {
+					header := fmt.Sprintf("\n### %s\n", label)
+					fmt.Fprint(out, header)
+					rep.WriteString(header)
 				}
+				text, err := migrateOne(out, reg, src, from, targets, c, opts, doApply, noBackup, parseAction(onConflict))
+				rep.WriteString(text)
+				return err
 			}
+
+			if recursive {
+				root := engine.FindProjectRoot(ctx.ProjectPath, ctx.HomeDir)
+				dirs := engine.DiscoverProjectDirs(root, src)
+				if len(dirs) == 0 {
+					dirs = []string{root}
+				}
+				fmt.Fprintf(out, "recursive: %d %s project(s) under %s\n", len(dirs), from, root)
+				for _, dir := range dirs {
+					c := ir.Context{ProjectPath: dir}
+					if dir == root {
+						c.HomeDir = ctx.HomeDir // home/memory layer runs once, at the root
+					}
+					rel, _ := filepath.Rel(root, dir)
+					if rel == "." {
+						rel = "(root)"
+					}
+					if err := runFor(c, rel); err != nil {
+						return err
+					}
+				}
+			} else if err := runFor(ctx, ""); err != nil {
+				return err
+			}
+
 			if !doApply {
 				fmt.Fprintln(out, "\n(dry-run — no files written; pass --apply to write, with .bak backups)")
 			}
@@ -237,7 +290,34 @@ func migrateCmd(out io.Writer) *cobra.Command {
 	f.BoolVar(&yes, "yes", false, "apply without confirmation")
 	f.BoolVar(&apply, "apply", false, "apply the migration (write files)")
 	f.BoolVar(&noBackup, "no-backup", false, "do not create .bak backups")
+	f.BoolVarP(&recursive, "recursive", "r", false, "find the project root and migrate every nested project in place")
 	return cmd
+}
+
+// migrateOne exports from src at ctx and plans/applies to every target,
+// returning the report text. It is the single-directory unit of work reused by
+// both plain and recursive migrations.
+func migrateOne(out io.Writer, reg *adapter.Registry, src adapter.ToolAdapter, from string, targets []string, ctx ir.Context, opts adapter.ImportOptions, doApply, noBackup bool, onConflict ir.Action) (string, error) {
+	bundle, err := engine.Export(src, ctx, opts)
+	if err != nil {
+		return "", fmt.Errorf("export from %s: %w", from, err)
+	}
+	var rep strings.Builder
+	for _, id := range targets {
+		dst, _ := reg.Get(id)
+		p := engine.Plan(dst, bundle, ctx, opts)
+		section := plan.RenderDiff(p)
+		fmt.Fprint(out, section)
+		rep.WriteString(section)
+		if doApply {
+			res := dst.Apply(p, adapter.ApplyOptions{DryRun: false, Backup: !noBackup, OnConflict: onConflict})
+			summary := renderApply(id, res)
+			fmt.Fprint(out, summary)
+			rep.WriteString(summary)
+			emitTrustGuidance(out, dst, p)
+		}
+	}
+	return rep.String(), nil
 }
 
 func resolveCategories(only, skip string) (map[string]bool, error) {
