@@ -53,6 +53,50 @@ func TestApplySkipMode(t *testing.T) {
 	}
 }
 
+func TestApplySkipConflictKeepsExisting(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "f.md")
+	os.WriteFile(target, []byte("old"), 0o644)
+	p := ir.WritePlan{Files: []ir.PlannedFile{{Path: target, Content: []byte("new"), Existing: []byte("old"), Mode: ir.ModeOverwrite}}}
+	res := Apply(p, ApplyOptions{OnConflict: ir.ActionSkip, Backup: true})
+	got, _ := os.ReadFile(target)
+	if string(got) != "old" {
+		t.Fatalf("skip policy must keep existing, got %q", got)
+	}
+	if len(res.Skipped) != 1 || len(res.Written) != 0 {
+		t.Fatalf("expected skipped=1 written=0, got %+v", res)
+	}
+	if _, err := os.Stat(target + ".bak"); !os.IsNotExist(err) {
+		t.Fatal("skip must not create a .bak")
+	}
+}
+
+func TestApplyOverwriteConflictReplaces(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "f.md")
+	os.WriteFile(target, []byte("old"), 0o644)
+	p := ir.WritePlan{Files: []ir.PlannedFile{{Path: target, Content: []byte("new"), Existing: []byte("old"), Mode: ir.ModeOverwrite}}}
+	res := Apply(p, ApplyOptions{OnConflict: ir.ActionOverwrite, Backup: true})
+	got, _ := os.ReadFile(target)
+	if string(got) != "new" || len(res.Written) != 1 {
+		t.Fatalf("overwrite policy must replace, got %q %+v", got, res)
+	}
+}
+
+// A new (non-existing) file is always written regardless of conflict policy.
+func TestApplySkipConflictStillCreatesNew(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "new.md")
+	p := ir.WritePlan{Files: []ir.PlannedFile{{Path: target, Content: []byte("x"), Mode: ir.ModeCreate}}}
+	res := Apply(p, ApplyOptions{OnConflict: ir.ActionSkip})
+	if _, err := os.Stat(target); err != nil {
+		t.Fatalf("new file should be created even under skip: %v", err)
+	}
+	if len(res.Written) != 1 {
+		t.Fatalf("written=%v", res.Written)
+	}
+}
+
 func TestApplyCreatesParentDirs(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "a", "b", "c.md")

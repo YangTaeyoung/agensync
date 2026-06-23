@@ -243,18 +243,11 @@ func migrateCmd(out io.Writer) *cobra.Command {
 
 			if recursive {
 				root := engine.FindProjectRoot(ctx.ProjectPath, ctx.HomeDir)
-				dirs := engine.DiscoverProjectDirs(root, src)
-				if len(dirs) == 0 {
-					dirs = []string{root}
-				}
-				fmt.Fprintf(out, "recursive: %d %s project(s) under %s\n", len(dirs), from, root)
-				for _, dir := range dirs {
-					c := ir.Context{ProjectPath: dir}
-					if dir == root {
-						c.HomeDir = ctx.HomeDir // home/memory layer runs once, at the root
-					}
-					rel, _ := filepath.Rel(root, dir)
-					if rel == "." {
+				ctxs := engine.MigrationContexts(ctx, src, true)
+				fmt.Fprintf(out, "recursive: %d %s project(s) under %s\n", len(ctxs), from, root)
+				for _, c := range ctxs {
+					rel, _ := filepath.Rel(root, c.ProjectPath)
+					if rel == "." || rel == "" {
 						rel = "(root)"
 					}
 					if err := runFor(c, rel); err != nil {
@@ -282,7 +275,7 @@ func migrateCmd(out io.Writer) *cobra.Command {
 	f.StringVar(&to, "to", "", "comma-separated target tool ids")
 	f.StringVar(&only, "only", "", "only these categories (comma-separated)")
 	f.StringVar(&skip, "skip", "", "skip these categories (comma-separated)")
-	f.StringVar(&onConflict, "on-conflict", "skip", "conflict policy: skip|overwrite|merge|suffix")
+	f.StringVar(&onConflict, "on-conflict", "overwrite", "conflict policy: skip|overwrite|merge|suffix")
 	f.StringVar(&project, "project", "", "project root (default: cwd)")
 	f.StringVar(&home, "home", "", "home dir (default: $HOME)")
 	f.StringVar(&report, "report", "", "write the migration report to this path")

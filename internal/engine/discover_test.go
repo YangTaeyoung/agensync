@@ -77,6 +77,37 @@ func TestDiscoverProjectDirsFindsNestedSkipsJunk(t *testing.T) {
 	}
 }
 
+func TestMigrationContextsSingle(t *testing.T) {
+	ctx := ir.Context{ProjectPath: "/p", HomeDir: "/h"}
+	got := MigrationContexts(ctx, fsAdapter{}, false)
+	if len(got) != 1 || got[0] != ctx {
+		t.Fatalf("non-recursive should return the ctx as-is, got %+v", got)
+	}
+}
+
+func TestMigrationContextsRecursive(t *testing.T) {
+	root := t.TempDir()
+	os.MkdirAll(filepath.Join(root, ".git"), 0o755)
+	mkfile(t, filepath.Join(root, "CLAUDE.md"))
+	mkfile(t, filepath.Join(root, "svc", "a", "CLAUDE.md"))
+
+	ctx := ir.Context{ProjectPath: filepath.Join(root, "svc", "a"), HomeDir: "/home"}
+	got := MigrationContexts(ctx, fsAdapter{}, true)
+	if len(got) != 2 {
+		t.Fatalf("expected 2 contexts (root + svc/a), got %+v", got)
+	}
+	byPath := map[string]ir.Context{}
+	for _, c := range got {
+		byPath[c.ProjectPath] = c
+	}
+	if byPath[root].HomeDir != "/home" {
+		t.Fatalf("root context must carry home (memory layer once): %+v", byPath[root])
+	}
+	if byPath[filepath.Join(root, "svc", "a")].HomeDir != "" {
+		t.Fatalf("nested context must NOT carry home: %+v", byPath[filepath.Join(root, "svc", "a")])
+	}
+}
+
 func TestDiscoverProjectDirsEmptyWhenNone(t *testing.T) {
 	root := t.TempDir()
 	mkfile(t, filepath.Join(root, "README.md"))

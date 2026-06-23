@@ -64,6 +64,30 @@ func DiscoverProjectDirs(root string, src adapter.ToolAdapter) []string {
 	return dirs
 }
 
+// MigrationContexts returns the directories to migrate as resolved contexts.
+// Non-recursive: just ctx. Recursive: the project root (nearest .git ancestor)
+// plus every nested directory with source config; only the root carries HomeDir
+// so the home-dir/memory layer is migrated exactly once.
+func MigrationContexts(ctx ir.Context, src adapter.ToolAdapter, recursive bool) []ir.Context {
+	if !recursive {
+		return []ir.Context{ctx}
+	}
+	root := FindProjectRoot(ctx.ProjectPath, ctx.HomeDir)
+	dirs := DiscoverProjectDirs(root, src)
+	if len(dirs) == 0 {
+		dirs = []string{root}
+	}
+	out := make([]ir.Context, len(dirs))
+	for i, d := range dirs {
+		c := ir.Context{ProjectPath: d}
+		if d == root {
+			c.HomeDir = ctx.HomeDir
+		}
+		out[i] = c
+	}
+	return out
+}
+
 func shouldSkipDir(name string) bool {
 	if name == "" {
 		return false

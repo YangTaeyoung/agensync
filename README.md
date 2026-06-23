@@ -79,9 +79,11 @@ agensync
 
 <div align="center">
 
-`From` → `To (multi-select)` → `Categories` → **Plan preview + loss report** → per-conflict choice → **Apply**
+**Detected tools** → `From` → `To (multi-select)` → `Categories` → `Options: overwrite? recurse?` → **Plan preview + loss report** → **Apply + progress**
 
 </div>
+
+The interactive flow shows which tools are detected in the current project, lets you pick **From**/**To**, toggle **Overwrite** (existing files; `.bak` backups always kept) and **Recurse into subdirectories** (monorepo), then previews exactly what will change before you confirm. `↑/↓` move · `space` toggle · `enter` next · `esc` back · `q` quit.
 
 ## 🧰 Supported tools
 

@@ -23,6 +23,12 @@ func Apply(p ir.WritePlan, opts ApplyOptions) ir.ApplyResult {
 			res.Skipped = append(res.Skipped, f.Path)
 			continue
 		}
+		// Conflict policy: skip leaves an existing file untouched. Overwrite (and
+		// the empty default) replaces it, backed up below. New files are always written.
+		if f.Existing != nil && opts.OnConflict == ir.ActionSkip {
+			res.Skipped = append(res.Skipped, f.Path)
+			continue
+		}
 		if opts.DryRun {
 			res.Written = append(res.Written, f.Path) // would-write
 			continue
